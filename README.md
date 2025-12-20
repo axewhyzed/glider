@@ -133,6 +133,7 @@ Create a new JSON file in `configs/` to scrape a new site.
   "name": "HackerNews Config",
   "base_url": "[https://news.ycombinator.com/](https://news.ycombinator.com/)",
   "mode": "pagination",
+  "respect_robots_txt": true,
   "rate_limit": 2,
   "fields": [
     {
@@ -218,6 +219,17 @@ glider/
 └── requirements.txt    # Project dependencies
 
 ```
+---
+
+## ⚖️ Legal & Ethical Notice
+
+**Disclaimer:** Web scraping may be subject to legal regulations (e.g., GDPR, CCPA, CFAA).
+
+1. **Public Data Only:** This tool is designed for extracting publicly available data.
+2. **Respect the Server:** Do not overload websites. Use the `rate_limit` and `min_delay` features.
+3. **Robots.txt:** Use `"respect_robots_txt": true` to adhere to site policies.
+
+The authors require that this software be used in accordance with all applicable laws and website terms of service.
 
 ---
 

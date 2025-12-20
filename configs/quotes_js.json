@@ -1,46 +1,106 @@
 {
-  "name": "Quotes to Scrape (JS)",
-  "base_url": "http://quotes.toscrape.com/js/",
-  "mode": "pagination",
-  "use_playwright": true,
-  "rate_limit": 2,
-  "min_delay": 2,
-  "max_delay": 5,
-  "proxies": [],
-  "wait_for_selector": "div.quote",
-  "interactions": [
-    {
-      "type": "scroll"
+    "name": "Quotes_To_Scrape_Practice",
+    "mode": "pagination",
+    "base_url": "https://quotes.toscrape.com/page/1/",
+    "use_playwright": false,
+    "respect_robots_txt": true,
+    "use_checkpointing": true,
+    "concurrency": 3,
+    "rate_limit": 5,
+    "min_delay": 1,
+    "max_delay": 2,
+    "pagination": {
+        "selector": {
+            "type": "css",
+            "value": "li.next a"
+        },
+        "max_pages": 10
     },
-    {
-      "type": "wait",
-      "duration": 1000
-    }
-  ],
-  "fields": [
-    {
-      "name": "quotes",
-      "is_list": true,
-      "selectors": [{"type": "css", "value": "div.quote"}],
-      "children": [
+    "fields": [
         {
-          "name": "text",
-          "selectors": [{"type": "css", "value": "span.text"}]
+            "name": "quotes",
+            "is_list": true,
+            "selectors": [
+                {
+                    "type": "css",
+                    "value": "div.quote"
+                }
+            ],
+            "children": [
+                {
+                    "name": "text",
+                    "selectors": [
+                        {
+                            "type": "css",
+                            "value": "span.text"
+                        }
+                    ],
+                    "transformers": [
+                        {
+                            "name": "strip",
+                            "args": []
+                        }
+                    ]
+                },
+                {
+                    "name": "author",
+                    "selectors": [
+                        {
+                            "type": "css",
+                            "value": "small.author"
+                        }
+                    ],
+                    "transformers": [
+                        {
+                            "name": "strip",
+                            "args": []
+                        }
+                    ]
+                },
+                {
+                    "name": "author_url",
+                    "selectors": [
+                        {
+                            "type": "xpath",
+                            "value": ".//span/a/@href"
+                        }
+                    ],
+                    "transformers": [
+                        {
+                            "name": "strip",
+                            "args": []
+                        }
+                    ]
+                }
+            ]
         },
         {
-          "name": "author",
-          "selectors": [{"type": "css", "value": "small.author"}]
-        },
-        {
-          "name": "tags",
-          "is_list": true,
-          "selectors": [{"type": "css", "value": "div.tags > a.tag"}]
+            "name": "tags",
+            "is_list": true,
+            "selectors": [
+                {
+                    "type": "css",
+                    "value": "div.quote"
+                }
+            ],
+            "children": [
+                {
+                    "name": "quote_tags",
+                    "is_list": true,
+                    "selectors": [
+                        {
+                            "type": "css",
+                            "value": "div.tags a.tag"
+                        }
+                    ],
+                    "transformers": [
+                        {
+                            "name": "strip",
+                            "args": []
+                        }
+                    ]
+                }
+            ]
         }
-      ]
-    }
-  ],
-  "pagination": {
-    "selector": {"type": "css", "value": "li.next > a"},
-    "max_pages": 5
-  }
+    ]
 }

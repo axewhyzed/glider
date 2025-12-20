@@ -14,7 +14,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from aiolimiter import AsyncLimiter
 from fake_useragent import UserAgent
 
-# Checkpointing
 from engine.checkpoint import CheckpointManager
 
 # --- ROBUST STEALTH IMPORT ---
@@ -28,18 +27,27 @@ except ImportError:
         logger.warning("⚠️ Could not import 'playwright-stealth'. Bot evasion will be disabled.")
 # -----------------------------
 
-from engine.schemas import ScraperConfig, ScrapeMode
+from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
 from engine.resolver import HtmlResolver
 
 class ScraperEngine:
+    """
+    Core scraping engine handling resource management, concurrency, and parsing strategies.
+    
+    Attributes:
+        config (ScraperConfig): Configuration object defining scrape behavior.
+        aggregated_data (Dict): In-memory storage of scraped results.
+    """
     def __init__(
         self, 
         config: ScraperConfig, 
-        output_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+        output_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        stats_callback: Optional[Callable[[str], None]] = None
     ):
         self.config = config
         self.aggregated_data: Dict[str, Any] = {}
         self.output_callback = output_callback
+        self.stats_callback = stats_callback
         
         # Resources
         self.playwright = None
@@ -61,6 +69,9 @@ class ScraperEngine:
         self.proxy_pool = cycle(config.proxies) if config.proxies else None
 
     async def run(self) -> Dict[str, Any]:
+        """
+        Main entry point. Initializes resources and dispatches the appropriate scrape mode.
+        """
         logger.info(f"🚀 Starting ASYNC scrape for: {self.config.name} (Mode: {self.config.mode.value})")
         
         await self._setup_resources()
@@ -87,6 +98,7 @@ class ScraperEngine:
         return None
 
     async def _init_robots_txt(self):
+        """Fetches and parses robots.txt for the base URL in a non-blocking thread."""
         logger.info("🤖 Checking robots.txt policies...")
         try:
             parsed_url = urlparse(str(self.config.base_url))
@@ -95,7 +107,6 @@ class ScraperEngine:
             self.robots_parser = urllib.robotparser.RobotFileParser()
             self.robots_parser.set_url(robots_url)
             
-            # FIX: Run blocking I/O in executor to maintain async purity
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.robots_parser.read)
             
@@ -110,6 +121,7 @@ class ScraperEngine:
         return self.robots_parser.can_fetch("*", url)
 
     async def _run_pagination_mode(self):
+        """Executes depth-first pagination crawling."""
         current_url = str(self.config.base_url)
         pages_scraped = 0
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
@@ -117,6 +129,7 @@ class ScraperEngine:
         while pages_scraped < max_pages and current_url:
             if not self._is_allowed(current_url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {current_url}")
+                if self.stats_callback: self.stats_callback("blocked")
                 break
 
             logger.info(f"📄 Scraping Page {pages_scraped + 1}: {current_url}")
@@ -124,10 +137,12 @@ class ScraperEngine:
             html_content = await self._fetch_page(current_url)
             if not html_content:
                 logger.error("❌ Failed to retrieve content. Stopping chain.")
+                if self.stats_callback: self.stats_callback("error")
                 break
 
             await self._process_content(html_content)
             self.checkpoint.mark_done(current_url)
+            if self.stats_callback: self.stats_callback("success")
             
             pages_scraped += 1
             if self.config.pagination and pages_scraped < max_pages:
@@ -136,7 +151,6 @@ class ScraperEngine:
                 if next_link:
                     current_url = urljoin(current_url, next_link)
                     delay = random.uniform(self.config.min_delay, self.config.max_delay)
-                    logger.debug(f"💤 Sleeping for {delay:.2f}s...")
                     await asyncio.sleep(delay)
                 else:
                     logger.warning("🛑 No 'Next' button found.")
@@ -145,6 +159,7 @@ class ScraperEngine:
                 current_url = None
 
     async def _run_list_mode(self):
+        """Executes breadth-first parallel crawling."""
         raw_urls = self.config.start_urls or []
         urls = [str(u) for u in raw_urls]
         
@@ -154,6 +169,8 @@ class ScraperEngine:
             skipped = original_count - len(urls)
             if skipped > 0:
                 logger.info(f"⏭️ Skipping {skipped} URLs (already in checkpoint).")
+                if self.stats_callback: 
+                    for _ in range(skipped): self.stats_callback("skipped")
 
         if not urls:
             logger.warning("⚠️ No URLs to process.")
@@ -165,6 +182,7 @@ class ScraperEngine:
         async def _worker(url):
             if not self._is_allowed(url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {url}")
+                if self.stats_callback: self.stats_callback("blocked")
                 return
 
             async with sem:
@@ -174,8 +192,11 @@ class ScraperEngine:
                     if html:
                         await self._process_content(html)
                         self.checkpoint.mark_done(url)
+                        if self.stats_callback: self.stats_callback("success")
                         delay = random.uniform(0.5, 1.5)
                         await asyncio.sleep(delay)
+                    else:
+                        if self.stats_callback: self.stats_callback("error")
 
         tasks = [_worker(url) for url in urls]
         await asyncio.gather(*tasks)
@@ -187,6 +208,7 @@ class ScraperEngine:
             await self._merge_data(data)
         except Exception as e:
             logger.error(f"⚠️ Parsing/Extraction Error: {e}")
+            if self.stats_callback: self.stats_callback("error")
 
     async def _setup_resources(self):
         if self.config.use_playwright:
@@ -220,6 +242,32 @@ class ScraperEngine:
         if self.playwright: await self.playwright.stop()
         if self.session: await self.session.close()
 
+    async def _handle_interactions(self, page):
+        """Executes defined browser interactions (click, scroll, fill)."""
+        if not self.config.interactions:
+            return
+
+        for action in self.config.interactions:
+            try:
+                if action.type == InteractionType.WAIT:
+                    await page.wait_for_timeout(action.duration or 1000)
+                
+                elif action.type == InteractionType.SCROLL:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(1) # Settle
+                
+                elif action.type == InteractionType.CLICK and action.selector:
+                    await page.click(action.selector)
+                
+                elif action.type == InteractionType.FILL and action.selector and action.value:
+                    await page.fill(action.selector, action.value)
+                
+                elif action.type == InteractionType.PRESS and action.selector and action.value:
+                    await page.press(action.selector, action.value)
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Interaction failed ({action.type}): {e}")
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
         current_proxy = self._get_next_proxy()
@@ -233,13 +281,17 @@ class ScraperEngine:
                     await stealth_async(page) # type: ignore
                 
                 await page.goto(url, timeout=30000)
+                
+                # Interactions (New Feature)
+                await self._handle_interactions(page)
+                
+                # Standard Wait
                 if self.config.wait_for_selector:
                     try:
                         await page.wait_for_selector(self.config.wait_for_selector, timeout=10000)
                     except Exception:
                         pass
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(1)
+                
                 content = await page.content()
                 return content
             except Exception as e:
@@ -275,7 +327,6 @@ class ScraperEngine:
 
     async def _merge_data(self, page_data: Dict[str, Any]):
         async with self.data_lock: 
-            # 1. Update In-Memory Aggregation
             for key, value in page_data.items():
                 if key not in self.aggregated_data:
                     self.aggregated_data[key] = value
@@ -288,6 +339,5 @@ class ScraperEngine:
                                 target.append(item)
                                 self.seen_hashes.add(item_hash)
             
-            # 2. FIX: Incremental Write Callback
             if self.output_callback:
                 await self.output_callback(page_data)

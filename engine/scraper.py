@@ -18,23 +18,24 @@ from engine.checkpoint import CheckpointManager
 from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
 from engine.resolver import HtmlResolver
 
-# --- ROBUST STEALTH IMPORT ---
+# --- ROBUST STEALTH IMPORT (v1.0.6 Compatible) ---
 stealth_async: Optional[Callable[[Page], Awaitable[None]]] = None
 
 try:
-    # 1. Try importing the async function directly (Standard)
+    # Standard import for playwright-stealth < 2.0.0
     from playwright_stealth import stealth_async # type: ignore
-except ImportError:
-    try:
-        # 2. Try importing from the submodule (Some versions/forks)
-        from playwright_stealth.stealth import stealth_async # type: ignore
-    except ImportError:
-        logger.warning("⚠️ Could not import 'playwright-stealth'. Bot evasion will be disabled.")
+except ImportError as e:
+    logger.warning(f"⚠️ Could not import 'playwright-stealth': {e}")
 
 # Final check to ensure we have a callable function
 if stealth_async and not callable(stealth_async):
-    logger.warning("⚠️ 'stealth_async' is not callable (likely a module). Disabling stealth.")
-    stealth_async = None
+    # Fallback for weird module resolution issues
+    if hasattr(stealth_async, 'stealth_async'):
+        stealth_async = stealth_async.stealth_async # type: ignore
+        logger.warning("stealth enabled")
+    else:
+        logger.warning("⚠️ 'stealth_async' is not callable. Disabling stealth.")
+        stealth_async = None
 # -----------------------------
 
 class ScraperEngine:
@@ -49,7 +50,7 @@ class ScraperEngine:
     ):
         self.config = config
         self.aggregated_data: Dict[str, Any] = {}
-        self.failed_urls: List[str] = [] # NEW: Track failures
+        self.failed_urls: List[str] = []
         self.output_callback = output_callback
         self.stats_callback = stats_callback
         
@@ -73,7 +74,7 @@ class ScraperEngine:
         self.proxy_pool = cycle(config.proxies) if config.proxies else None
 
     async def run(self) -> Dict[str, Any]:
-        """Main entry point. Initializes resources and dispatches the appropriate scrape mode."""
+        """Main entry point."""
         logger.info(f"🚀 Starting ASYNC scrape for: {self.config.name} (Mode: {self.config.mode.value})")
         
         await self._setup_resources()
@@ -107,7 +108,6 @@ class ScraperEngine:
         return None
 
     async def _init_robots_txt(self):
-        """Fetches and parses robots.txt for the base URL in a non-blocking thread."""
         logger.info("🤖 Checking robots.txt policies...")
         try:
             parsed_url = urlparse(str(self.config.base_url))
@@ -130,7 +130,6 @@ class ScraperEngine:
         return self.robots_parser.can_fetch("*", url)
 
     async def _run_pagination_mode(self):
-        """Executes depth-first pagination crawling."""
         if not self.config.base_url:
              logger.error("Base URL is required for pagination mode.")
              return
@@ -174,10 +173,9 @@ class ScraperEngine:
                 logger.error(f"❌ Failed to scrape {current_url}: {e}")
                 self.failed_urls.append(current_url)
                 if self.stats_callback: self.stats_callback("error")
-                break # Break chain on error
+                break
 
     async def _run_list_mode(self):
-        """Executes breadth-first parallel crawling."""
         raw_urls = self.config.start_urls or []
         urls = [str(u) for u in raw_urls]
         
@@ -256,8 +254,7 @@ class ScraperEngine:
                 viewport={"width": 1920, "height": 1080}
             )
         else:
-            # FIX: Use supported browser identifiers. Removed edge110.
-            # Using chrome120 and safari15_5 which are generally stable in curl_cffi
+            # Using stable browser fingerprints supported by curl_cffi
             browser_choice: Any = random.choice(["chrome110", "chrome120", "chrome100", "opera78", "safari17_0", "safari15_5"])
             logger.info(f"🕵️ Impersonating: {browser_choice}")
             self.session = AsyncSession(impersonate=browser_choice)
@@ -269,7 +266,6 @@ class ScraperEngine:
         if self.session: await self.session.close()
 
     async def _handle_interactions(self, page):
-        """Executes defined browser interactions (click, scroll, fill)."""
         if not self.config.interactions:
             return
 
@@ -277,27 +273,19 @@ class ScraperEngine:
             try:
                 if action.type == InteractionType.WAIT:
                     await page.wait_for_timeout(action.duration or 1000)
-                
                 elif action.type == InteractionType.SCROLL:
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await asyncio.sleep(1) 
-                
+                    await asyncio.sleep(1)
                 elif action.type == InteractionType.CLICK and action.selector:
                     await page.click(action.selector)
-                
                 elif action.type == InteractionType.FILL and action.selector and action.value:
                     await page.fill(action.selector, action.value)
-                
                 elif action.type == InteractionType.PRESS and action.selector and action.value:
                     await page.press(action.selector, action.value)
-
                 elif action.type == InteractionType.HOVER and action.selector:
                     await page.hover(action.selector)
-                
                 elif action.type == InteractionType.KEY_PRESS and action.value:
-                    # Press a global key (like 'Enter' or 'ArrowDown')
                     await page.keyboard.press(action.value)
-                    
             except Exception as e:
                 logger.warning(f"⚠️ Interaction failed ({action.type}): {e}")
 
@@ -310,7 +298,9 @@ class ScraperEngine:
             page = None 
             try:
                 page = await self.context.new_page()
-                if stealth_async and callable(stealth_async):
+                
+                # Apply Stealth (if available)
+                if stealth_async:
                     await stealth_async(page)
                 
                 await page.goto(url, timeout=30000)

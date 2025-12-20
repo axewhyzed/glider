@@ -13,9 +13,12 @@ class TransformerType(str, Enum):
     REGEX = "regex"
     REPLACE = "replace"
 
+class ScrapeMode(str, Enum):
+    PAGINATION = "pagination"  # Follow "Next" buttons (Depth-first)
+    LIST = "list"              # Scrape a list of URLs in parallel (Breadth-first)
+
 class Transformer(BaseModel):
     name: TransformerType
-    # args can now handle [decimal_separator, thousand_separator] for to_float
     args: Optional[List[Any]] = []
 
 class Selector(BaseModel):
@@ -36,6 +39,11 @@ class Pagination(BaseModel):
 class ScraperConfig(BaseModel):
     name: str
     base_url: HttpUrl
+    mode: ScrapeMode = ScrapeMode.PAGINATION
+    
+    # NEW: For List Mode
+    start_urls: Optional[List[HttpUrl]] = []
+
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
     
@@ -43,7 +51,7 @@ class ScraperConfig(BaseModel):
     min_delay: int = 1
     max_delay: int = 3
     proxy: Optional[str] = None
-    concurrency: int = 1  # NEW: For future parallel processing
+    concurrency: int = 1  # Used for List Mode parallelism
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None

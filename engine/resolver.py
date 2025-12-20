@@ -95,3 +95,29 @@ class HtmlResolver:
         if hasattr(element, 'text'):
             return element.text(strip=True)
         return str(element)
+    
+    def get_attribute(self, selector: Selector, attribute: str) -> Optional[str]:
+        """
+        Extracts a specific attribute (like 'href' or 'src') from an element.
+        Useful for Pagination (href) or Images (src).
+        """
+        if selector.type == SelectorType.CSS:
+             # Logic for Lexbor (CSS)
+             # FIX: Check if root exists before searching
+            if self.parser.root:
+                element = self.parser.root.css_first(selector.value)
+                if element:
+                    return element.attributes.get(attribute)
+                
+        elif selector.type == SelectorType.XPATH:
+            # Logic for LXML (XPath)
+            try:
+                results = self.lxml_tree.xpath(selector.value)
+                if results:
+                    item = results[0]
+                    # lxml elements behave like dictionaries for attributes
+                    return item.get(attribute)
+            except Exception:
+                pass
+        
+        return None

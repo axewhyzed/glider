@@ -1,32 +1,38 @@
 {
-  "min_delay": 2,
-  "max_delay": 5,
-  "name": "Books To Scrape Example",
-  "base_url": "http://books.toscrape.com/",
-  "use_playwright": false,
+  "name": "Books to Scrape",
+  "base_url": "http://books.toscrape.com/catalogue/category/books/mystery_3/index.html",
+  "mode": "pagination",
+  "concurrency": 2,
+  "rate_limit": 5,
+  "respect_robots_txt": false,
+  "use_checkpointing": true,
+  "proxies": [],
   "fields": [
     {
-      "name": "products",
+      "name": "books",
       "is_list": true,
-      "selectors": [
-        { "type": "css", "value": "article.product_pod" }
-      ],
+      "selectors": [{"type": "css", "value": "article.product_pod"}],
       "children": [
         {
           "name": "title",
-          "selectors": [{ "type": "css", "value": "h3 a" }],
-          "transformers": [{ "name": "strip" }]
+          "selectors": [{"type": "css", "value": "h3 > a"}],
+          "transformers": [{"name": "strip"}]
         },
         {
           "name": "price",
-          "selectors": [{ "type": "css", "value": "p.price_color" }],
-          "transformers": [{ "name": "strip" }]
+          "selectors": [{"type": "css", "value": "p.price_color"}],
+          "transformers": [{"name": "to_float", "args": [".", ""]}]
+        },
+        {
+          "name": "availability",
+          "selectors": [{"type": "css", "value": "p.instock.availability"}],
+          "transformers": [{"name": "strip"}]
         }
       ]
     }
   ],
   "pagination": {
-    "selector": { "type": "css", "value": "li.next a" },
+    "selector": {"type": "css", "value": "li.next > a"},
     "max_pages": 3
   }
 }

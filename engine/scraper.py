@@ -15,6 +15,8 @@ from aiolimiter import AsyncLimiter
 from fake_useragent import UserAgent
 
 from engine.checkpoint import CheckpointManager
+from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
+from engine.resolver import HtmlResolver
 
 # --- ROBUST STEALTH IMPORT ---
 stealth_async: Optional[Callable[[Page], Awaitable[None]]] = None
@@ -35,9 +37,6 @@ if stealth_async and not callable(stealth_async):
     stealth_async = None
 # -----------------------------
 
-from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
-from engine.resolver import HtmlResolver
-
 class ScraperEngine:
     """
     Core scraping engine handling resource management, concurrency, and parsing strategies.
@@ -50,6 +49,7 @@ class ScraperEngine:
     ):
         self.config = config
         self.aggregated_data: Dict[str, Any] = {}
+        self.failed_urls: List[str] = [] # NEW: Track failures
         self.output_callback = output_callback
         self.stats_callback = stats_callback
         
@@ -78,7 +78,7 @@ class ScraperEngine:
         
         await self._setup_resources()
         
-        if self.config.respect_robots_txt:
+        if self.config.respect_robots_txt and self.config.base_url:
             await self._init_robots_txt()
 
         try:
@@ -91,6 +91,13 @@ class ScraperEngine:
             self.checkpoint.close()
 
         total_items = sum(len(v) if isinstance(v, list) else 1 for v in self.aggregated_data.values())
+        
+        # Report Failures
+        if self.failed_urls:
+             logger.error(f"❌ {len(self.failed_urls)} URLs failed completely after retries.")
+             for url in self.failed_urls[:5]:
+                 logger.debug(f"Failed: {url}")
+
         logger.success(f"✅ Finished! Extracted {total_items} total unique items.")
         return self.aggregated_data
 
@@ -124,6 +131,10 @@ class ScraperEngine:
 
     async def _run_pagination_mode(self):
         """Executes depth-first pagination crawling."""
+        if not self.config.base_url:
+             logger.error("Base URL is required for pagination mode.")
+             return
+
         current_url = str(self.config.base_url)
         pages_scraped = 0
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
@@ -136,29 +147,34 @@ class ScraperEngine:
 
             logger.info(f"📄 Scraping Page {pages_scraped + 1}: {current_url}")
             
-            html_content = await self._fetch_page(current_url)
-            if not html_content:
-                logger.error("❌ Failed to retrieve content. Stopping chain.")
-                if self.stats_callback: self.stats_callback("error")
-                break
-
-            await self._process_content(html_content)
-            self.checkpoint.mark_done(current_url)
-            if self.stats_callback: self.stats_callback("success")
-            
-            pages_scraped += 1
-            if self.config.pagination and pages_scraped < max_pages:
-                resolver = HtmlResolver(html_content)
-                next_link = resolver.get_attribute(self.config.pagination.selector, "href")
-                if next_link:
-                    current_url = urljoin(current_url, next_link)
-                    delay = random.uniform(self.config.min_delay, self.config.max_delay)
-                    await asyncio.sleep(delay)
+            try:
+                html_content = await self._fetch_page(current_url)
+                if not html_content:
+                    raise Exception("Empty content")
+                
+                await self._process_content(html_content)
+                self.checkpoint.mark_done(current_url)
+                if self.stats_callback: self.stats_callback("success")
+                
+                pages_scraped += 1
+                if self.config.pagination and pages_scraped < max_pages:
+                    resolver = HtmlResolver(html_content)
+                    next_link = resolver.get_attribute(self.config.pagination.selector, "href")
+                    if next_link:
+                        current_url = urljoin(current_url, next_link)
+                        delay = random.uniform(self.config.min_delay, self.config.max_delay)
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.warning("🛑 No 'Next' button found.")
+                        current_url = None
                 else:
-                    logger.warning("🛑 No 'Next' button found.")
                     current_url = None
-            else:
-                current_url = None
+
+            except Exception as e:
+                logger.error(f"❌ Failed to scrape {current_url}: {e}")
+                self.failed_urls.append(current_url)
+                if self.stats_callback: self.stats_callback("error")
+                break # Break chain on error
 
     async def _run_list_mode(self):
         """Executes breadth-first parallel crawling."""
@@ -189,16 +205,22 @@ class ScraperEngine:
 
             async with sem:
                 async with self.rate_limiter:
-                    logger.info(f"▶️ Fetching: {url}")
-                    html = await self._fetch_page(url)
-                    if html:
-                        await self._process_content(html)
-                        self.checkpoint.mark_done(url)
-                        if self.stats_callback: self.stats_callback("success")
-                        delay = random.uniform(0.5, 1.5)
-                        await asyncio.sleep(delay)
-                    else:
+                    try:
+                        logger.info(f"▶️ Fetching: {url}")
+                        html = await self._fetch_page(url)
+                        if html:
+                            await self._process_content(html)
+                            self.checkpoint.mark_done(url)
+                            if self.stats_callback: self.stats_callback("success")
+                        else:
+                            raise Exception("Empty HTML returned")
+                    except Exception as e:
+                        logger.error(f"Failed to fetch {url}: {e}")
+                        self.failed_urls.append(url)
                         if self.stats_callback: self.stats_callback("error")
+                    
+                    delay = random.uniform(0.5, 1.5)
+                    await asyncio.sleep(delay)
 
         tasks = [_worker(url) for url in urls]
         await asyncio.gather(*tasks)
@@ -210,7 +232,7 @@ class ScraperEngine:
             await self._merge_data(data)
         except Exception as e:
             logger.error(f"⚠️ Parsing/Extraction Error: {e}")
-            if self.stats_callback: self.stats_callback("error")
+            raise e
 
     async def _setup_resources(self):
         if self.config.use_playwright:
@@ -234,8 +256,9 @@ class ScraperEngine:
                 viewport={"width": 1920, "height": 1080}
             )
         else:
-            # Using stable browser fingerprints supported by curl_cffi
-            browser_choice: Any = random.choice(["chrome110", "chrome120", "chrome100", "opera78", "safari17_0"])
+            # FIX: Use supported browser identifiers. Removed edge110.
+            # Using chrome120 and safari15_5 which are generally stable in curl_cffi
+            browser_choice: Any = random.choice(["chrome110", "chrome120", "chrome100", "opera78", "safari17_0", "safari15_5"])
             logger.info(f"🕵️ Impersonating: {browser_choice}")
             self.session = AsyncSession(impersonate=browser_choice)
 
@@ -257,7 +280,7 @@ class ScraperEngine:
                 
                 elif action.type == InteractionType.SCROLL:
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await asyncio.sleep(1) # Settle
+                    await asyncio.sleep(1) 
                 
                 elif action.type == InteractionType.CLICK and action.selector:
                     await page.click(action.selector)
@@ -267,6 +290,13 @@ class ScraperEngine:
                 
                 elif action.type == InteractionType.PRESS and action.selector and action.value:
                     await page.press(action.selector, action.value)
+
+                elif action.type == InteractionType.HOVER and action.selector:
+                    await page.hover(action.selector)
+                
+                elif action.type == InteractionType.KEY_PRESS and action.value:
+                    # Press a global key (like 'Enter' or 'ArrowDown')
+                    await page.keyboard.press(action.value)
                     
             except Exception as e:
                 logger.warning(f"⚠️ Interaction failed ({action.type}): {e}")
@@ -280,17 +310,12 @@ class ScraperEngine:
             page = None 
             try:
                 page = await self.context.new_page()
-                
-                # Robust Stealth Call
-                if stealth_async:
+                if stealth_async and callable(stealth_async):
                     await stealth_async(page)
                 
                 await page.goto(url, timeout=30000)
-                
-                # Interactions
                 await self._handle_interactions(page)
                 
-                # Standard Wait
                 if self.config.wait_for_selector:
                     try:
                         await page.wait_for_selector(self.config.wait_for_selector, timeout=10000)

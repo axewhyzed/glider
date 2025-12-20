@@ -41,6 +41,12 @@ class ScraperConfig(BaseModel):
     base_url: HttpUrl
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
+    
+    # NEW: Anti-Ban Settings
+    min_delay: int = 1      # Minimum seconds to sleep between pages
+    max_delay: int = 3      # Maximum seconds to sleep
+    proxy: Optional[str] = None # e.g., "http://user:pass@host:port"
+
     fields: List[DataField]
     pagination: Optional[Pagination] = None
 

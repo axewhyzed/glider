@@ -187,6 +187,17 @@ pip freeze > requirements.txt
 
 ```
 
+**⚠️ Important:** Always verify that `requirements.txt` is saved with UTF-8 encoding before committing. If your editor uses UTF-16 or another encoding by default, manually convert the file or use:
+
+```bash
+# Force UTF-8 encoding (Linux/macOS)
+pip freeze | iconv -f UTF-8 -t UTF-8 > requirements.txt
+
+# Force UTF-8 encoding (Windows PowerShell)
+pip freeze | Out-File -Encoding utf8 requirements.txt
+
+```
+
 ---
 
 ## 📂 Project Structure

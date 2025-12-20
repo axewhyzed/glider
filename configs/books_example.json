@@ -1,0 +1,30 @@
+{
+  "name": "Books To Scrape Example",
+  "base_url": "http://books.toscrape.com/",
+  "use_playwright": false,
+  "fields": [
+    {
+      "name": "products",
+      "is_list": true,
+      "selectors": [
+        { "type": "css", "value": "article.product_pod" }
+      ],
+      "children": [
+        {
+          "name": "title",
+          "selectors": [{ "type": "css", "value": "h3 a" }],
+          "transformers": [{ "name": "strip" }]
+        },
+        {
+          "name": "price",
+          "selectors": [{ "type": "css", "value": "p.price_color" }],
+          "transformers": [{ "name": "strip" }]
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "selector": { "type": "css", "value": "li.next a" },
+    "max_pages": 3
+  }
+}

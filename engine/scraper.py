@@ -6,6 +6,8 @@ from urllib.parse import urljoin
 # Async Imports
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright
+# NEW: Anti-Bot Stealth (Added type: ignore to silence Pylance error)
+from playwright_stealth import stealth_async  # type: ignore
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -82,8 +84,6 @@ class ScraperEngine:
         """
         List Mode: Fetches a list of URLs in PARALLEL.
         """
-        # FIX: Pylance complains if we iterate Optional[List] directly. 
-        # We enforce it to be a list with 'or []'.
         raw_urls = self.config.start_urls or []
         urls = [str(u) for u in raw_urls]
         
@@ -91,7 +91,6 @@ class ScraperEngine:
             logger.warning("⚠️ No start_urls provided for List Mode.")
             return
 
-        # Semaphore limits concurrency (e.g., only 5 active requests at once)
         sem = asyncio.Semaphore(self.config.concurrency)
         logger.info(f"⚡ Processing {len(urls)} URLs with Concurrency={self.config.concurrency}")
 
@@ -103,27 +102,32 @@ class ScraperEngine:
                     resolver = HtmlResolver(html)
                     data = self._extract_data(resolver)
                     self._merge_data(data)
-                    
-                    # Random delay between Worker tasks to reduce burst pattern
                     delay = random.uniform(0.5, 1.5)
                     await asyncio.sleep(delay)
 
-        # Launch all tasks
         tasks = [_worker(url) for url in urls]
         await asyncio.gather(*tasks)
 
-    # --- Resources & Networking (Same as v2.0) ---
+    # --- Resources & Networking ---
 
     async def _setup_resources(self):
         if self.config.use_playwright:
             logger.info("🎭 Launching Playwright...")
             self.playwright = await async_playwright().start()
+            
             launch_args: Dict[str, Any] = {"headless": True}
+            
             if self.config.proxy:
                 logger.info(f"🛡️ Using Proxy: {self.config.proxy}")
                 launch_args["proxy"] = {"server": self.config.proxy}
+                
             self.browser = await self.playwright.chromium.launch(**launch_args)
-            self.context = await self.browser.new_context()
+            
+            # Setup Context with better user-agent simulation
+            self.context = await self.browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080}
+            )
         else:
             self.session = AsyncSession(impersonate="chrome110")
 
@@ -139,6 +143,10 @@ class ScraperEngine:
             if not self.context: return ""
             try:
                 page = await self.context.new_page()
+                
+                # APPLY STEALTH
+                await stealth_async(page)
+                
                 await page.goto(url, timeout=30000)
                 if self.config.wait_for_selector:
                     try:
@@ -178,9 +186,6 @@ class ScraperEngine:
         return data
 
     def _merge_data(self, page_data: Dict[str, Any]):
-        # Naive merge: if it's a list, append. If scalar, overwrite.
-        # Ideally needs a lock for async, but Python dicts are thread-safe for atomic ops
-        # and asyncio is single-threaded, so this is safe.
         for key, value in page_data.items():
             if key not in self.aggregated_data:
                 self.aggregated_data[key] = value

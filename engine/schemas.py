@@ -49,9 +49,12 @@ class ScraperConfig(BaseModel):
     # Anti-Ban & Performance
     min_delay: int = 1
     max_delay: int = 3
-    rate_limit: int = 5   # NEW: Requests per second
-    concurrency: int = 2  # Max active requests
+    rate_limit: int = 5
+    concurrency: int = 2
     proxy: Optional[str] = None
+    
+    # Ethical Scraping
+    respect_robots_txt: bool = False  # NEW: Defaults to False (User choice)
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None

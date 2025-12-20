@@ -2,8 +2,9 @@ import asyncio
 import random
 import hashlib
 import json
+import urllib.robotparser
 from typing import Dict, Any, Optional, List
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright
@@ -12,19 +13,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from aiolimiter import AsyncLimiter 
 
 # --- ROBUST STEALTH IMPORT ---
-# We type hint as Any to prevent Pylance "Module not callable" errors
 stealth_async: Any = None 
-
 try:
-    # 1. Try importing standard v1.x function
     from playwright_stealth import stealth_async # type: ignore
 except ImportError:
     try:
-        # 2. Try importing generic 'stealth' (v2.x or forks)
         from playwright_stealth import stealth as stealth_async # type: ignore
     except ImportError:
         logger.warning("⚠️ Could not import 'playwright-stealth'. Bot evasion will be disabled.")
-
 # -----------------------------
 
 from engine.schemas import ScraperConfig, ScrapeMode
@@ -39,17 +35,21 @@ class ScraperEngine:
         self.browser = None
         self.context = None
         self.session: Optional[AsyncSession] = None
+        self.robots_parser: Optional[urllib.robotparser.RobotFileParser] = None
         
         # Concurrency & Safety Controls
         self.data_lock = asyncio.Lock() 
         self.seen_hashes = set() 
-        # Rate Limiter: requests per second
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
 
     async def run(self) -> Dict[str, Any]:
         logger.info(f"🚀 Starting ASYNC scrape for: {self.config.name} (Mode: {self.config.mode.value})")
         
         await self._setup_resources()
+        
+        # NEW: Initialize Robots.txt if requested
+        if self.config.respect_robots_txt:
+            await self._init_robots_txt()
 
         try:
             if self.config.mode == ScrapeMode.LIST:
@@ -63,12 +63,41 @@ class ScraperEngine:
         logger.success(f"✅ Finished! Extracted {total_items} total unique items.")
         return self.aggregated_data
 
+    async def _init_robots_txt(self):
+        """Fetches and parses robots.txt for the base URL."""
+        logger.info("🤖 Checking robots.txt policies...")
+        try:
+            parsed_url = urlparse(str(self.config.base_url))
+            robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
+            
+            self.robots_parser = urllib.robotparser.RobotFileParser()
+            self.robots_parser.set_url(robots_url)
+            
+            # Read synchronously (urllib is sync) but it's one-time init
+            # In production, wrap in loop.run_in_executor if strict async needed
+            self.robots_parser.read()
+            logger.info(f"✅ Robots.txt parsed from {robots_url}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to parse robots.txt: {e}. Defaulting to ALLOW all.")
+            self.robots_parser = None
+
+    def _is_allowed(self, url: str) -> bool:
+        """Checks if URL is allowed by robots.txt."""
+        if not self.config.respect_robots_txt or not self.robots_parser:
+            return True
+        return self.robots_parser.can_fetch("*", url)
+
     async def _run_pagination_mode(self):
         current_url = str(self.config.base_url)
         pages_scraped = 0
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
 
         while pages_scraped < max_pages and current_url:
+            # NEW: Ethical Check
+            if not self._is_allowed(current_url):
+                logger.warning(f"⛔ URL blocked by robots.txt: {current_url}")
+                break
+
             logger.info(f"📄 Scraping Page {pages_scraped + 1}: {current_url}")
             
             html_content = await self._fetch_page(current_url)
@@ -105,6 +134,11 @@ class ScraperEngine:
         logger.info(f"⚡ Processing {len(urls)} URLs with Concurrency={self.config.concurrency}")
 
         async def _worker(url):
+            # NEW: Ethical Check
+            if not self._is_allowed(url):
+                logger.warning(f"⛔ URL blocked by robots.txt: {url}")
+                return
+
             async with sem:
                 async with self.rate_limiter:
                     logger.info(f"▶️ Fetching: {url}")
@@ -118,7 +152,6 @@ class ScraperEngine:
         await asyncio.gather(*tasks)
     
     async def _process_content(self, html: str):
-        """Helper to safely parse and merge data (Fixes Error Recovery)"""
         try:
             resolver = HtmlResolver(html)
             data = self._extract_data(resolver)
@@ -142,7 +175,6 @@ class ScraperEngine:
                 viewport={"width": 1920, "height": 1080}
             )
         else:
-            # Fix: Random Impersonation
             browser_choice: Any = random.choice(["chrome110", "chrome120", "edge110", "safari17_0"])
             logger.info(f"🕵️ Impersonating: {browser_choice}")
             self.session = AsyncSession(impersonate=browser_choice)
@@ -157,11 +189,10 @@ class ScraperEngine:
     async def _fetch_page(self, url: str) -> str:
         if self.config.use_playwright:
             if not self.context: return ""
+            page = None # Initialize variable for safety
             try:
                 page = await self.context.new_page()
                 
-                # Apply Stealth if available
-                # FIX: Explicit type ignore to silence Pylance "Module not callable"
                 if stealth_async:
                     await stealth_async(page) # type: ignore
                 
@@ -174,11 +205,15 @@ class ScraperEngine:
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(1)
                 content = await page.content()
-                await page.close()
+                # page.close() is now handled in finally block
                 return content
             except Exception as e:
                 logger.warning(f"Browser Error: {e}")
                 raise e
+            finally:
+                # FIX: Resource Leak - Always close the page
+                if page:
+                    await page.close()
         else:
             if not self.session: return ""
             try:
@@ -204,8 +239,7 @@ class ScraperEngine:
         return data
 
     async def _merge_data(self, page_data: Dict[str, Any]):
-        """Safe merge with Locking and Deduplication"""
-        async with self.data_lock: # Fix: Race Condition
+        async with self.data_lock: 
             for key, value in page_data.items():
                 if key not in self.aggregated_data:
                     self.aggregated_data[key] = value
@@ -213,7 +247,6 @@ class ScraperEngine:
                     target = self.aggregated_data[key]
                     if isinstance(target, list) and isinstance(value, list):
                         for item in value:
-                            # Fix: Deduplication via Hash
                             item_hash = hashlib.md5(json.dumps(item, sort_keys=True).encode()).hexdigest()
                             if item_hash not in self.seen_hashes:
                                 target.append(item)

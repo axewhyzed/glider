@@ -6,7 +6,7 @@ pip install curl_cffi selectolax playwright pydantic typer colorama
 
 playwright install chromium
 
-pip install lxml
+pip install lxml loguru
 
 pip freeze > requirements.txt
 

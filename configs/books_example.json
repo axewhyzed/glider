@@ -1,4 +1,6 @@
 {
+  "min_delay": 2,
+  "max_delay": 5,
   "name": "Books To Scrape Example",
   "base_url": "http://books.toscrape.com/",
   "use_playwright": false,

@@ -1,0 +1,31 @@
+{
+  "name": "Quotes JS Test",
+  "base_url": "http://quotes.toscrape.com/js/",
+  "use_playwright": true,
+  "wait_for_selector": "div.quote",
+  "fields": [
+    {
+      "name": "quotes",
+      "is_list": true,
+      "selectors": [
+        { "type": "css", "value": "div.quote" }
+      ],
+      "children": [
+        {
+          "name": "text",
+          "selectors": [{ "type": "css", "value": "span.text" }],
+          "transformers": [{ "name": "strip" }]
+        },
+        {
+          "name": "author",
+          "selectors": [{ "type": "css", "value": "small.author" }],
+          "transformers": [{ "name": "strip" }]
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "selector": { "type": "css", "value": "li.next a" },
+    "max_pages": 2
+  }
+}

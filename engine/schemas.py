@@ -2,7 +2,6 @@ from typing import List, Optional, Any
 from enum import Enum
 from pydantic import BaseModel, HttpUrl
 
-# 1. Enums (Keep as is)
 class SelectorType(str, Enum):
     CSS = "css"
     XPATH = "xpath"
@@ -16,22 +15,20 @@ class TransformerType(str, Enum):
 
 class Transformer(BaseModel):
     name: TransformerType
+    # args can now handle [decimal_separator, thousand_separator] for to_float
     args: Optional[List[Any]] = []
 
 class Selector(BaseModel):
     type: SelectorType
     value: str
 
-# 2. Updated DataField (Added 'children')
 class DataField(BaseModel):
     name: str
     selectors: List[Selector]
     is_list: bool = False
     transformers: List[Transformer] = []
-    # NEW: Allows us to scrape data INSIDE this element
     children: Optional[List['DataField']] = None 
 
-# 3. Pagination & Config (Keep as is)
 class Pagination(BaseModel):
     selector: Selector
     max_pages: int = 5
@@ -42,13 +39,13 @@ class ScraperConfig(BaseModel):
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
     
-    # NEW: Anti-Ban Settings
-    min_delay: int = 1      # Minimum seconds to sleep between pages
-    max_delay: int = 3      # Maximum seconds to sleep
-    proxy: Optional[str] = None # e.g., "http://user:pass@host:port"
+    # Anti-Ban & Performance Settings
+    min_delay: int = 1
+    max_delay: int = 3
+    proxy: Optional[str] = None
+    concurrency: int = 1  # NEW: For future parallel processing
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None
 
-# Essential for recursive Pydantic models
 DataField.model_rebuild()

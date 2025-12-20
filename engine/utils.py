@@ -12,44 +12,57 @@ def apply_transformers(text: str, transformers: List[Transformer]) -> Any:
     current_value = text
     
     for t in transformers:
-        # 1. STRIP (Trim whitespace)
+        # 1. STRIP
         if t.name == TransformerType.STRIP:
             if isinstance(current_value, str):
                 current_value = current_value.strip()
             
-        # 2. TO_FLOAT (Extract price)
+        # 2. TO_FLOAT (Enhanced for Locale)
         elif t.name == TransformerType.TO_FLOAT:
             try:
-                # Remove everything that isn't a digit or a dot (e.g. "£51.77" -> "51.77")
-                clean = re.sub(r'[^\d.]', '', str(current_value))
+                val_str = str(current_value).strip()
+                
+                # Check for custom separators in args: [decimal_sep, thousand_sep]
+                # Default: decimal='.', thousand=',' (US/UK)
+                decimal_sep = "."
+                thousand_sep = ","
+                
+                if t.args and len(t.args) >= 1:
+                    decimal_sep = t.args[0]
+                if t.args and len(t.args) >= 2:
+                    thousand_sep = t.args[1]
+
+                # Remove thousand separators
+                val_str = val_str.replace(thousand_sep, "")
+                # Replace decimal separator with dot (Python standard)
+                val_str = val_str.replace(decimal_sep, ".")
+                
+                # Clean remaining non-numeric chars (except dot and minus)
+                clean = re.sub(r'[^\d.-]', '', val_str)
                 current_value = float(clean)
             except ValueError:
-                current_value = 0.0 # Soft fail
+                current_value = 0.0
                 
-        # 3. TO_INT (Extract count)
+        # 3. TO_INT
         elif t.name == TransformerType.TO_INT:
             try:
-                # Remove non-digits
                 clean = re.sub(r'[^\d]', '', str(current_value))
                 current_value = int(clean)
             except ValueError:
                 current_value = 0
                 
-        # 4. REGEX (Extract pattern)
+        # 4. REGEX
         elif t.name == TransformerType.REGEX:
-            # Config format: "args": ["(Start|Stop)"]
             if t.args and len(t.args) > 0:
                 pattern = t.args[0]
                 match = re.search(pattern, str(current_value))
                 if match:
-                    # If regex has a group (), return that. Else return full match.
                     current_value = match.group(1) if match.groups() else match.group(0)
                 else:
                     current_value = None
 
-        # 5. REPLACE (Simple text swap)
+        # 5. REPLACE
         elif t.name == TransformerType.REPLACE:
-            # Config format: "args": ["Old", "New"]
             if t.args and len(t.args) >= 2:
                 current_value = str(current_value).replace(t.args[0], t.args[1])
     

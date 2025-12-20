@@ -5,13 +5,17 @@ import json
 import urllib.robotparser
 from typing import Dict, Any, Optional, List
 from urllib.parse import urljoin, urlparse
+from itertools import cycle
 
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from aiolimiter import AsyncLimiter
-from fake_useragent import UserAgent  # NEW: Dynamic UA
+from fake_useragent import UserAgent
+
+# Checkpointing
+from engine.checkpoint import CheckpointManager
 
 # --- ROBUST STEALTH IMPORT ---
 stealth_async: Any = None 
@@ -31,6 +35,7 @@ class ScraperEngine:
     def __init__(self, config: ScraperConfig):
         self.config = config
         self.aggregated_data: Dict[str, Any] = {}
+        
         # Resources
         self.playwright = None
         self.browser = None
@@ -38,11 +43,17 @@ class ScraperEngine:
         self.session: Optional[AsyncSession] = None
         self.robots_parser: Optional[urllib.robotparser.RobotFileParser] = None
         
-        # Concurrency & Safety Controls
+        # State Management
+        self.checkpoint = CheckpointManager(config.name, config.use_checkpointing)
+        
+        # Concurrency & Safety
         self.data_lock = asyncio.Lock() 
         self.seen_hashes = set() 
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
-        self.ua_rotator = UserAgent() # NEW
+        self.ua_rotator = UserAgent()
+        
+        # Proxy Rotation
+        self.proxy_pool = cycle(config.proxies) if config.proxies else None
 
     async def run(self) -> Dict[str, Any]:
         logger.info(f"🚀 Starting ASYNC scrape for: {self.config.name} (Mode: {self.config.mode.value})")
@@ -59,13 +70,18 @@ class ScraperEngine:
                 await self._run_pagination_mode()
         finally:
             await self._cleanup_resources()
+            self.checkpoint.close()
 
         total_items = sum(len(v) if isinstance(v, list) else 1 for v in self.aggregated_data.values())
         logger.success(f"✅ Finished! Extracted {total_items} total unique items.")
         return self.aggregated_data
 
+    def _get_next_proxy(self) -> Optional[str]:
+        if self.proxy_pool:
+            return next(self.proxy_pool)
+        return None
+
     async def _init_robots_txt(self):
-        """Fetches and parses robots.txt for the base URL."""
         logger.info("🤖 Checking robots.txt policies...")
         try:
             parsed_url = urlparse(str(self.config.base_url))
@@ -80,7 +96,6 @@ class ScraperEngine:
             self.robots_parser = None
 
     def _is_allowed(self, url: str) -> bool:
-        """Checks if URL is allowed by robots.txt."""
         if not self.config.respect_robots_txt or not self.robots_parser:
             return True
         return self.robots_parser.can_fetch("*", url)
@@ -103,6 +118,7 @@ class ScraperEngine:
                 break
 
             await self._process_content(html_content)
+            self.checkpoint.mark_done(current_url) # Mark as visited
             
             pages_scraped += 1
             if self.config.pagination and pages_scraped < max_pages:
@@ -123,8 +139,16 @@ class ScraperEngine:
         raw_urls = self.config.start_urls or []
         urls = [str(u) for u in raw_urls]
         
+        # Filter out URLs already scraped
+        if self.config.use_checkpointing:
+            original_count = len(urls)
+            urls = [u for u in urls if not self.checkpoint.is_done(u)]
+            skipped = original_count - len(urls)
+            if skipped > 0:
+                logger.info(f"⏭️ Skipping {skipped} URLs (already in checkpoint).")
+
         if not urls:
-            logger.warning("⚠️ No start_urls provided for List Mode.")
+            logger.warning("⚠️ No URLs to process (or all were skipped).")
             return
 
         sem = asyncio.Semaphore(self.config.concurrency)
@@ -141,6 +165,7 @@ class ScraperEngine:
                     html = await self._fetch_page(url)
                     if html:
                         await self._process_content(html)
+                        self.checkpoint.mark_done(url) # Save progress
                         delay = random.uniform(0.5, 1.5)
                         await asyncio.sleep(delay)
 
@@ -161,13 +186,15 @@ class ScraperEngine:
             self.playwright = await async_playwright().start()
             
             launch_args: Dict[str, Any] = {"headless": True}
-            if self.config.proxy:
-                logger.info(f"🛡️ Using Proxy: {self.config.proxy}")
-                launch_args["proxy"] = {"server": self.config.proxy}
+            
+            # Proxy config for Browser
+            proxy_url = self._get_next_proxy()
+            if proxy_url:
+                logger.info(f"🛡️ Using Proxy: {proxy_url}")
+                launch_args["proxy"] = {"server": proxy_url}
                 
             self.browser = await self.playwright.chromium.launch(**launch_args)
             
-            # IMPROVEMENT: Dynamic User-Agent Rotation
             dynamic_ua = self.ua_rotator.random
             logger.info(f"🕵️  Playwright User-Agent: {dynamic_ua}")
             
@@ -188,6 +215,9 @@ class ScraperEngine:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
+        # Get a proxy for this request (Rotation)
+        current_proxy = self._get_next_proxy()
+        
         if self.config.use_playwright:
             if not self.context: return ""
             page = None 
@@ -216,8 +246,10 @@ class ScraperEngine:
             if not self.session: return ""
             try:
                 proxies: Any = None
-                if self.config.proxy:
-                    proxies = {"http": self.config.proxy, "https": self.config.proxy}
+                if current_proxy:
+                    proxies = {"http": current_proxy, "https": current_proxy}
+                # FIX: Removed dead code referencing self.config.proxy
+
                 response = await self.session.get(url, timeout=15, proxies=proxies)
                 if response.status_code == 200:
                     return response.text

@@ -1,6 +1,6 @@
 from typing import List, Optional, Any
 from enum import Enum
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, Field
 
 class SelectorType(str, Enum):
     CSS = "css"
@@ -49,12 +49,16 @@ class ScraperConfig(BaseModel):
     # Anti-Ban & Performance
     min_delay: int = 1
     max_delay: int = 3
-    rate_limit: int = 5
-    concurrency: int = 2
-    proxy: Optional[str] = None
     
-    # Ethical Scraping
-    respect_robots_txt: bool = False  # NEW: Defaults to False (User choice)
+    # NEW: Proxy Rotation (List of proxy URLs)
+    proxies: Optional[List[str]] = Field(default=None, description="List of proxy URLs to rotate")
+    
+    concurrency: int = 2
+    rate_limit: int = 5
+    
+    # Ethical & Reliability
+    respect_robots_txt: bool = False
+    use_checkpointing: bool = False  # NEW: Resume capability
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None

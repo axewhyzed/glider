@@ -10,7 +10,8 @@ from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from aiolimiter import AsyncLimiter 
+from aiolimiter import AsyncLimiter
+from fake_useragent import UserAgent  # NEW: Dynamic UA
 
 # --- ROBUST STEALTH IMPORT ---
 stealth_async: Any = None 
@@ -41,13 +42,13 @@ class ScraperEngine:
         self.data_lock = asyncio.Lock() 
         self.seen_hashes = set() 
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
+        self.ua_rotator = UserAgent() # NEW
 
     async def run(self) -> Dict[str, Any]:
         logger.info(f"🚀 Starting ASYNC scrape for: {self.config.name} (Mode: {self.config.mode.value})")
         
         await self._setup_resources()
         
-        # NEW: Initialize Robots.txt if requested
         if self.config.respect_robots_txt:
             await self._init_robots_txt()
 
@@ -72,9 +73,6 @@ class ScraperEngine:
             
             self.robots_parser = urllib.robotparser.RobotFileParser()
             self.robots_parser.set_url(robots_url)
-            
-            # Read synchronously (urllib is sync) but it's one-time init
-            # In production, wrap in loop.run_in_executor if strict async needed
             self.robots_parser.read()
             logger.info(f"✅ Robots.txt parsed from {robots_url}")
         except Exception as e:
@@ -93,7 +91,6 @@ class ScraperEngine:
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
 
         while pages_scraped < max_pages and current_url:
-            # NEW: Ethical Check
             if not self._is_allowed(current_url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {current_url}")
                 break
@@ -134,7 +131,6 @@ class ScraperEngine:
         logger.info(f"⚡ Processing {len(urls)} URLs with Concurrency={self.config.concurrency}")
 
         async def _worker(url):
-            # NEW: Ethical Check
             if not self._is_allowed(url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {url}")
                 return
@@ -170,8 +166,13 @@ class ScraperEngine:
                 launch_args["proxy"] = {"server": self.config.proxy}
                 
             self.browser = await self.playwright.chromium.launch(**launch_args)
+            
+            # IMPROVEMENT: Dynamic User-Agent Rotation
+            dynamic_ua = self.ua_rotator.random
+            logger.info(f"🕵️  Playwright User-Agent: {dynamic_ua}")
+            
             self.context = await self.browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                user_agent=dynamic_ua,
                 viewport={"width": 1920, "height": 1080}
             )
         else:
@@ -189,10 +190,9 @@ class ScraperEngine:
     async def _fetch_page(self, url: str) -> str:
         if self.config.use_playwright:
             if not self.context: return ""
-            page = None # Initialize variable for safety
+            page = None 
             try:
                 page = await self.context.new_page()
-                
                 if stealth_async:
                     await stealth_async(page) # type: ignore
                 
@@ -205,13 +205,11 @@ class ScraperEngine:
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(1)
                 content = await page.content()
-                # page.close() is now handled in finally block
                 return content
             except Exception as e:
                 logger.warning(f"Browser Error: {e}")
                 raise e
             finally:
-                # FIX: Resource Leak - Always close the page
                 if page:
                     await page.close()
         else:

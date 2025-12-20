@@ -1,5 +1,5 @@
 import re
-from typing import List, Any
+from typing import List, Any, Dict
 from engine.schemas import Transformer, TransformerType
 
 def apply_transformers(text: str, transformers: List[Transformer]) -> Any:
@@ -12,18 +12,13 @@ def apply_transformers(text: str, transformers: List[Transformer]) -> Any:
     current_value = text
     
     for t in transformers:
-        # 1. STRIP
         if t.name == TransformerType.STRIP:
             if isinstance(current_value, str):
                 current_value = current_value.strip()
             
-        # 2. TO_FLOAT (Enhanced for Locale)
         elif t.name == TransformerType.TO_FLOAT:
             try:
                 val_str = str(current_value).strip()
-                
-                # Check for custom separators in args: [decimal_sep, thousand_sep]
-                # Default: decimal='.', thousand=',' (US/UK)
                 decimal_sep = "."
                 thousand_sep = ","
                 
@@ -32,18 +27,14 @@ def apply_transformers(text: str, transformers: List[Transformer]) -> Any:
                 if t.args and len(t.args) >= 2:
                     thousand_sep = t.args[1]
 
-                # Remove thousand separators
                 val_str = val_str.replace(thousand_sep, "")
-                # Replace decimal separator with dot (Python standard)
                 val_str = val_str.replace(decimal_sep, ".")
                 
-                # Clean remaining non-numeric chars (except dot and minus)
                 clean = re.sub(r'[^\d.-]', '', val_str)
                 current_value = float(clean)
             except ValueError:
                 current_value = 0.0
                 
-        # 3. TO_INT
         elif t.name == TransformerType.TO_INT:
             try:
                 clean = re.sub(r'[^\d]', '', str(current_value))
@@ -51,7 +42,6 @@ def apply_transformers(text: str, transformers: List[Transformer]) -> Any:
             except ValueError:
                 current_value = 0
                 
-        # 4. REGEX
         elif t.name == TransformerType.REGEX:
             if t.args and len(t.args) > 0:
                 pattern = t.args[0]
@@ -61,9 +51,22 @@ def apply_transformers(text: str, transformers: List[Transformer]) -> Any:
                 else:
                     current_value = None
 
-        # 5. REPLACE
         elif t.name == TransformerType.REPLACE:
             if t.args and len(t.args) >= 2:
                 current_value = str(current_value).replace(t.args[0], t.args[1])
     
     return current_value
+
+def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
+    """
+    Recursively flattens a nested dictionary.
+    { "product": { "price": 10 } } -> { "product_price": 10 }
+    """
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)

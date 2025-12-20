@@ -14,8 +14,8 @@ class TransformerType(str, Enum):
     REPLACE = "replace"
 
 class ScrapeMode(str, Enum):
-    PAGINATION = "pagination"  # Follow "Next" buttons (Depth-first)
-    LIST = "list"              # Scrape a list of URLs in parallel (Breadth-first)
+    PAGINATION = "pagination"
+    LIST = "list"
 
 class Transformer(BaseModel):
     name: TransformerType
@@ -41,17 +41,17 @@ class ScraperConfig(BaseModel):
     base_url: HttpUrl
     mode: ScrapeMode = ScrapeMode.PAGINATION
     
-    # NEW: For List Mode
     start_urls: Optional[List[HttpUrl]] = []
 
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
     
-    # Anti-Ban & Performance Settings
+    # Anti-Ban & Performance
     min_delay: int = 1
     max_delay: int = 3
+    rate_limit: int = 5   # NEW: Requests per second
+    concurrency: int = 2  # Max active requests
     proxy: Optional[str] = None
-    concurrency: int = 1  # Used for List Mode parallelism
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None

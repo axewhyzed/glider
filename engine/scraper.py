@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 from itertools import cycle
 
 from curl_cffi.requests import AsyncSession
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from aiolimiter import AsyncLimiter
@@ -17,14 +17,22 @@ from fake_useragent import UserAgent
 from engine.checkpoint import CheckpointManager
 
 # --- ROBUST STEALTH IMPORT ---
-stealth_async: Any = None 
+stealth_async: Optional[Callable[[Page], Awaitable[None]]] = None
+
 try:
+    # 1. Try importing the async function directly (Standard)
     from playwright_stealth import stealth_async # type: ignore
 except ImportError:
     try:
-        from playwright_stealth import stealth as stealth_async # type: ignore
+        # 2. Try importing from the submodule (Some versions/forks)
+        from playwright_stealth.stealth import stealth_async # type: ignore
     except ImportError:
         logger.warning("⚠️ Could not import 'playwright-stealth'. Bot evasion will be disabled.")
+
+# Final check to ensure we have a callable function
+if stealth_async and not callable(stealth_async):
+    logger.warning("⚠️ 'stealth_async' is not callable (likely a module). Disabling stealth.")
+    stealth_async = None
 # -----------------------------
 
 from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
@@ -33,10 +41,6 @@ from engine.resolver import HtmlResolver
 class ScraperEngine:
     """
     Core scraping engine handling resource management, concurrency, and parsing strategies.
-    
-    Attributes:
-        config (ScraperConfig): Configuration object defining scrape behavior.
-        aggregated_data (Dict): In-memory storage of scraped results.
     """
     def __init__(
         self, 
@@ -69,9 +73,7 @@ class ScraperEngine:
         self.proxy_pool = cycle(config.proxies) if config.proxies else None
 
     async def run(self) -> Dict[str, Any]:
-        """
-        Main entry point. Initializes resources and dispatches the appropriate scrape mode.
-        """
+        """Main entry point. Initializes resources and dispatches the appropriate scrape mode."""
         logger.info(f"🚀 Starting ASYNC scrape for: {self.config.name} (Mode: {self.config.mode.value})")
         
         await self._setup_resources()
@@ -232,7 +234,8 @@ class ScraperEngine:
                 viewport={"width": 1920, "height": 1080}
             )
         else:
-            browser_choice: Any = random.choice(["chrome110", "chrome120", "edge110", "safari17_0"])
+            # Using stable browser fingerprints supported by curl_cffi
+            browser_choice: Any = random.choice(["chrome110", "chrome120", "chrome100", "opera78", "safari17_0"])
             logger.info(f"🕵️ Impersonating: {browser_choice}")
             self.session = AsyncSession(impersonate=browser_choice)
 
@@ -277,12 +280,14 @@ class ScraperEngine:
             page = None 
             try:
                 page = await self.context.new_page()
+                
+                # Robust Stealth Call
                 if stealth_async:
-                    await stealth_async(page) # type: ignore
+                    await stealth_async(page)
                 
                 await page.goto(url, timeout=30000)
                 
-                # Interactions (New Feature)
+                # Interactions
                 await self._handle_interactions(page)
                 
                 # Standard Wait

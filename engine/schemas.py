@@ -1,6 +1,6 @@
 from typing import List, Optional, Any
 from enum import Enum
-from pydantic import BaseModel, HttpUrl, Field
+from pydantic import BaseModel, HttpUrl, Field, field_validator
 
 class SelectorType(str, Enum):
     CSS = "css"
@@ -23,6 +23,8 @@ class InteractionType(str, Enum):
     SCROLL = "scroll"
     FILL = "fill"
     PRESS = "press"
+    HOVER = "hover"      # NEW
+    KEY_PRESS = "key"    # NEW
 
 class Transformer(BaseModel):
     name: TransformerType
@@ -49,10 +51,17 @@ class DataField(BaseModel):
 class Pagination(BaseModel):
     selector: Selector
     max_pages: int = 5
+    
+    @field_validator('max_pages')
+    @classmethod
+    def check_max_pages(cls, v):
+        if v < 1:
+            raise ValueError('max_pages must be at least 1')
+        return v
 
 class ScraperConfig(BaseModel):
     name: str
-    base_url: HttpUrl
+    base_url: Optional[HttpUrl] = None # Optional for list mode
     mode: ScrapeMode = ScrapeMode.PAGINATION
     
     start_urls: Optional[List[HttpUrl]] = []
@@ -60,7 +69,7 @@ class ScraperConfig(BaseModel):
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
     
-    # NEW: Browser Interactions (e.g., clicks, inputs)
+    # Browser Interactions
     interactions: Optional[List[Interaction]] = Field(default=[], description="Actions to perform before scraping")
     
     # Anti-Ban & Performance
@@ -78,5 +87,12 @@ class ScraperConfig(BaseModel):
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None
+    
+    @field_validator('concurrency', 'rate_limit')
+    @classmethod
+    def check_positive(cls, v):
+        if v < 1:
+            raise ValueError('Must be positive integer')
+        return v
 
 DataField.model_rebuild()

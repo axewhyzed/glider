@@ -1,31 +1,46 @@
 {
-  "name": "Quotes JS Test",
+  "name": "Quotes to Scrape (JS)",
   "base_url": "http://quotes.toscrape.com/js/",
+  "mode": "pagination",
   "use_playwright": true,
+  "rate_limit": 2,
+  "min_delay": 2,
+  "max_delay": 5,
+  "proxies": [],
   "wait_for_selector": "div.quote",
+  "interactions": [
+    {
+      "type": "scroll"
+    },
+    {
+      "type": "wait",
+      "duration": 1000
+    }
+  ],
   "fields": [
     {
       "name": "quotes",
       "is_list": true,
-      "selectors": [
-        { "type": "css", "value": "div.quote" }
-      ],
+      "selectors": [{"type": "css", "value": "div.quote"}],
       "children": [
         {
           "name": "text",
-          "selectors": [{ "type": "css", "value": "span.text" }],
-          "transformers": [{ "name": "strip" }]
+          "selectors": [{"type": "css", "value": "span.text"}]
         },
         {
           "name": "author",
-          "selectors": [{ "type": "css", "value": "small.author" }],
-          "transformers": [{ "name": "strip" }]
+          "selectors": [{"type": "css", "value": "small.author"}]
+        },
+        {
+          "name": "tags",
+          "is_list": true,
+          "selectors": [{"type": "css", "value": "div.tags > a.tag"}]
         }
       ]
     }
   ],
   "pagination": {
-    "selector": { "type": "css", "value": "li.next a" },
-    "max_pages": 2
+    "selector": {"type": "css", "value": "li.next > a"},
+    "max_pages": 5
   }
 }

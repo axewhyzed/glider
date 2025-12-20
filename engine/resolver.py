@@ -6,7 +6,7 @@ from engine.utils import apply_transformers
 
 class HtmlResolver:
     """
-    Parses HTML using Selectolax (CSS) OR lxml (XPath) with lazy loading.
+    Parses HTML using Selectolax (CSS) with a lazy-loaded fallback to lxml (XPath).
     """
     def __init__(self, html_content: str):
         self.raw_html = html_content
@@ -36,7 +36,10 @@ class HtmlResolver:
 
     def _extract_single(self, node: Any, field: DataField) -> Any:
         element = self._find_element(node, field.selectors)
-        if not element:
+        
+        # FIX: Explicit check for None. lxml elements with no children (text only)
+        # can evaluate to False in boolean contexts (len == 0).
+        if element is None:
             return None
 
         if field.children:
@@ -104,10 +107,19 @@ class HtmlResolver:
         return []
 
     def _get_text(self, element: Any) -> str:
-        if hasattr(element, 'text'):
-            return element.text(strip=True)
+        # FIX: Check if 'text' is callable. Selectolax has .text(), lxml has .text property.
+        if hasattr(element, 'text') and callable(element.text):
+            return str(element.text(strip=True))
+            
+        # LXML handling: .text_content() gets inner text of element and children
         if hasattr(element, 'text_content'):
-            return element.text_content().strip()
+            return str(element.text_content().strip())
+            
+        # Fallback for lxml elements where we just want the direct text
+        # We assume 'element.text' is truthy (not None) before stripping
+        if hasattr(element, 'text') and element.text:
+            return str(element.text).strip()
+            
         return str(element).strip()
 
     def get_attribute(self, selector: Selector, attribute: str) -> Optional[str]:

@@ -17,6 +17,13 @@ class ScrapeMode(str, Enum):
     PAGINATION = "pagination"
     LIST = "list"
 
+class InteractionType(str, Enum):
+    CLICK = "click"
+    WAIT = "wait"
+    SCROLL = "scroll"
+    FILL = "fill"
+    PRESS = "press"
+
 class Transformer(BaseModel):
     name: TransformerType
     args: Optional[List[Any]] = []
@@ -24,6 +31,13 @@ class Transformer(BaseModel):
 class Selector(BaseModel):
     type: SelectorType
     value: str
+
+class Interaction(BaseModel):
+    """Defines an action to perform on the page before extraction."""
+    type: InteractionType
+    selector: Optional[str] = None
+    value: Optional[str] = None  # Text to fill or key to press
+    duration: Optional[int] = None # Duration for wait (ms)
 
 class DataField(BaseModel):
     name: str
@@ -46,11 +60,13 @@ class ScraperConfig(BaseModel):
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
     
+    # NEW: Browser Interactions (e.g., clicks, inputs)
+    interactions: Optional[List[Interaction]] = Field(default=[], description="Actions to perform before scraping")
+    
     # Anti-Ban & Performance
     min_delay: int = 1
     max_delay: int = 3
     
-    # NEW: Proxy Rotation (List of proxy URLs)
     proxies: Optional[List[str]] = Field(default=None, description="List of proxy URLs to rotate")
     
     concurrency: int = 2
@@ -58,7 +74,7 @@ class ScraperConfig(BaseModel):
     
     # Ethical & Reliability
     respect_robots_txt: bool = False
-    use_checkpointing: bool = False  # NEW: Resume capability
+    use_checkpointing: bool = False
 
     fields: List[DataField]
     pagination: Optional[Pagination] = None

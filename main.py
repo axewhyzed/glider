@@ -7,19 +7,74 @@ import aiofiles
 from datetime import datetime
 from pathlib import Path
 from loguru import logger
+from typing import Dict, Any
+
+# Rich UI Imports
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.console import Console
+from rich.table import Table
+
 from engine.schemas import ScraperConfig
 from engine.scraper import ScraperEngine
 from engine.utils import flatten_dict
 
 app = typer.Typer()
+console = Console()
+
+class ScrapeStats:
+    """Tracks scraping metrics for the dashboard."""
+    def __init__(self):
+        self.success = 0
+        self.failed = 0
+        self.skipped = 0
+        self.blocked = 0
+        self.start_time = datetime.now()
+
+    def update(self, status: str):
+        if status == "success":
+            self.success += 1
+        elif status == "error":
+            self.failed += 1
+        elif status == "skipped":
+            self.skipped += 1
+        elif status == "blocked":
+            self.blocked += 1
+
+def create_layout() -> Layout:
+    layout = Layout()
+    layout.split(
+        Layout(name="header", size=3),
+        Layout(name="main"),
+        Layout(name="footer", size=3)
+    )
+    return layout
+
+def generate_dashboard(stats: ScrapeStats, config_name: str) -> Table:
+    """Generates the statistics table."""
+    elapsed = datetime.now() - stats.start_time
+    table = Table(title=f"🚀 Glider Scraper: {config_name}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="magenta")
+    
+    table.add_row("Elapsed Time", str(elapsed).split('.')[0])
+    table.add_row("Successful Pages", str(stats.success))
+    table.add_row("Failed Pages", f"[red]{stats.failed}[/red]")
+    table.add_row("Skipped (Checkpointed)", str(stats.skipped))
+    table.add_row("Blocked (Robots.txt)", f"[yellow]{stats.blocked}[/yellow]")
+    
+    return table
 
 def setup_logging():
     logger.remove()
+    # Console logs simplified for Dashboard compatibility
     logger.add(
         sys.stderr,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+        format="<level>{message}</level>",
         level="INFO"
     )
+    # Detailed File Logs
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     logger.add(
@@ -42,8 +97,7 @@ def save_to_file(data: dict, config_name: str):
     json_path = output_dir / f"{base_filename}.json"
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    logger.success(f"JSON saved to: {json_path}")
-
+    
     # 2. Save CSV (Robust Selection)
     best_key = None
     max_len = 0
@@ -60,21 +114,15 @@ def save_to_file(data: dict, config_name: str):
         flat_items = [flatten_dict(item) for item in raw_items]
         
         if flat_items:
-            # FIX: Collect ALL keys from ALL items (superset) to prevent missing columns
             all_keys = set()
             for item in flat_items:
                 all_keys.update(item.keys())
-            
-            # Sort keys for consistent column order
             fieldnames = sorted(list(all_keys))
             
             with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(flat_items)
-            logger.success(f"CSV saved to:  {csv_path} (Source: '{best_key}')")
-    else:
-        logger.warning("Skipping CSV: No suitable list of objects found in output.")
 
 @app.command()
 def scrape(config_path: str):
@@ -82,46 +130,66 @@ def scrape(config_path: str):
     path = Path(config_path)
     
     if not path.exists():
-        logger.critical(f"Config file not found: {config_path}")
+        console.print(f"[bold red]Config file not found: {config_path}[/bold red]")
         return
 
     try:
         with open(path, 'r') as f:
             raw_data = json.load(f)
         config = ScraperConfig(**raw_data)
-        logger.info(f"Loaded config: {config.name}")
     except Exception as e:
         logger.exception(f"Schema Validation Error: {e}")
         return
 
-    # FIX: Incremental Writer
+    # Initialize Stats & Temp File
+    stats = ScrapeStats()
     temp_file = Path("data") / "temp_stream.jsonl"
     temp_file.parent.mkdir(exist_ok=True)
+    if temp_file.exists(): temp_file.unlink()
 
     async def incremental_writer(data_chunk: dict):
-        """Callback to write data line-by-line as it arrives."""
         async with aiofiles.open(temp_file, mode='a', encoding='utf-8') as f:
             await f.write(json.dumps(data_chunk, ensure_ascii=False) + "\n")
 
-    # Pass callback to engine
-    engine = ScraperEngine(config, output_callback=incremental_writer)
-    
-    try:
-        # Clean previous temp file
-        if temp_file.exists():
-            temp_file.unlink()
+    def stats_updater(status: str):
+        stats.update(status)
 
-        result = asyncio.run(engine.run())
-        save_to_file(result, config.name)
+    engine = ScraperEngine(
+        config, 
+        output_callback=incremental_writer,
+        stats_callback=stats_updater
+    )
+    
+    # Run with Rich Dashboard
+    with Live(generate_dashboard(stats, config.name), refresh_per_second=4) as live:
         
-        # Cleanup temp file on success
-        if temp_file.exists():
-            temp_file.unlink()
+        async def run_wrapper():
+            while True:
+                live.update(generate_dashboard(stats, config.name))
+                await asyncio.sleep(0.5)
+                # This loop runs until the main task cancels it
+
+        try:
+            # We run the updater in background and wait for engine
+            # Note: A cleaner implementation would be integrating Live into the loop,
+            # but this works for a simple dashboard.
+            loop = asyncio.get_event_loop()
             
-    except KeyboardInterrupt:
-        logger.warning("Scrape interrupted by user. Partial data in 'data/temp_stream.jsonl'")
-    except Exception as e:
-        logger.exception(f"Fatal Error: {e}")
+            # Since run() is blocking in the async sense (it awaits), 
+            # we need to periodically update UI manually inside callbacks or use a wrapper.
+            # Here, the stats_callback updates state, and Live auto-refreshes.
+            
+            result = asyncio.run(engine.run())
+            
+            save_to_file(result, config.name)
+            if temp_file.exists(): temp_file.unlink()
+            
+            console.print(f"[bold green]Scrape Completed Successfully![/bold green]")
+            
+        except KeyboardInterrupt:
+            console.print("[bold yellow]Scrape interrupted. Partial data saved.[/bold yellow]")
+        except Exception as e:
+            logger.exception(f"Fatal Error: {e}")
 
 if __name__ == "__main__":
     app()

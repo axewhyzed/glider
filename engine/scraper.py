@@ -3,7 +3,7 @@ import random
 import hashlib
 import json
 import urllib.robotparser
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable, Awaitable
 from urllib.parse import urljoin, urlparse
 from itertools import cycle
 
@@ -32,9 +32,14 @@ from engine.schemas import ScraperConfig, ScrapeMode
 from engine.resolver import HtmlResolver
 
 class ScraperEngine:
-    def __init__(self, config: ScraperConfig):
+    def __init__(
+        self, 
+        config: ScraperConfig, 
+        output_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+    ):
         self.config = config
         self.aggregated_data: Dict[str, Any] = {}
+        self.output_callback = output_callback
         
         # Resources
         self.playwright = None
@@ -89,7 +94,11 @@ class ScraperEngine:
             
             self.robots_parser = urllib.robotparser.RobotFileParser()
             self.robots_parser.set_url(robots_url)
-            self.robots_parser.read()
+            
+            # FIX: Run blocking I/O in executor to maintain async purity
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.robots_parser.read)
+            
             logger.info(f"✅ Robots.txt parsed from {robots_url}")
         except Exception as e:
             logger.warning(f"⚠️ Failed to parse robots.txt: {e}. Defaulting to ALLOW all.")
@@ -118,7 +127,7 @@ class ScraperEngine:
                 break
 
             await self._process_content(html_content)
-            self.checkpoint.mark_done(current_url) # Mark as visited
+            self.checkpoint.mark_done(current_url)
             
             pages_scraped += 1
             if self.config.pagination and pages_scraped < max_pages:
@@ -139,7 +148,6 @@ class ScraperEngine:
         raw_urls = self.config.start_urls or []
         urls = [str(u) for u in raw_urls]
         
-        # Filter out URLs already scraped
         if self.config.use_checkpointing:
             original_count = len(urls)
             urls = [u for u in urls if not self.checkpoint.is_done(u)]
@@ -148,7 +156,7 @@ class ScraperEngine:
                 logger.info(f"⏭️ Skipping {skipped} URLs (already in checkpoint).")
 
         if not urls:
-            logger.warning("⚠️ No URLs to process (or all were skipped).")
+            logger.warning("⚠️ No URLs to process.")
             return
 
         sem = asyncio.Semaphore(self.config.concurrency)
@@ -165,7 +173,7 @@ class ScraperEngine:
                     html = await self._fetch_page(url)
                     if html:
                         await self._process_content(html)
-                        self.checkpoint.mark_done(url) # Save progress
+                        self.checkpoint.mark_done(url)
                         delay = random.uniform(0.5, 1.5)
                         await asyncio.sleep(delay)
 
@@ -187,7 +195,6 @@ class ScraperEngine:
             
             launch_args: Dict[str, Any] = {"headless": True}
             
-            # Proxy config for Browser
             proxy_url = self._get_next_proxy()
             if proxy_url:
                 logger.info(f"🛡️ Using Proxy: {proxy_url}")
@@ -215,7 +222,6 @@ class ScraperEngine:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
-        # Get a proxy for this request (Rotation)
         current_proxy = self._get_next_proxy()
         
         if self.config.use_playwright:
@@ -248,7 +254,6 @@ class ScraperEngine:
                 proxies: Any = None
                 if current_proxy:
                     proxies = {"http": current_proxy, "https": current_proxy}
-                # FIX: Removed dead code referencing self.config.proxy
 
                 response = await self.session.get(url, timeout=15, proxies=proxies)
                 if response.status_code == 200:
@@ -270,6 +275,7 @@ class ScraperEngine:
 
     async def _merge_data(self, page_data: Dict[str, Any]):
         async with self.data_lock: 
+            # 1. Update In-Memory Aggregation
             for key, value in page_data.items():
                 if key not in self.aggregated_data:
                     self.aggregated_data[key] = value
@@ -281,3 +287,7 @@ class ScraperEngine:
                             if item_hash not in self.seen_hashes:
                                 target.append(item)
                                 self.seen_hashes.add(item_hash)
+            
+            # 2. FIX: Incremental Write Callback
+            if self.output_callback:
+                await self.output_callback(page_data)

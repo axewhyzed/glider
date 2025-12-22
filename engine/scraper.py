@@ -3,6 +3,8 @@ import random
 import hashlib
 import json
 import urllib.robotparser
+import aiofiles
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, Awaitable, cast
 from urllib.parse import urljoin, urlparse
@@ -33,13 +35,11 @@ class ScraperEngine:
         self.output_callback = output_callback
         self.stats_callback = stats_callback
         
-        # Managers
         self.checkpoint = CheckpointManager(config.name, config.use_checkpointing)
         self.browser_manager = BrowserManager(config) if config.use_playwright else None
         self.robots_parser: Optional[urllib.robotparser.RobotFileParser] = None
         self.session: Optional[AsyncSession] = None
         
-        # State
         self.data_lock = asyncio.Lock() 
         self.bloom_path = Path("data") / f"{config.name.replace(' ', '_').lower()}.bloom"
         self.seen_hashes = BloomFilter(capacity=100000, error_rate=0.001)
@@ -55,7 +55,6 @@ class ScraperEngine:
 
     async def run(self):
         logger.info(f"🚀 Starting Engine for: {self.config.name}")
-        
         await self._setup_resources()
         
         if self.config.respect_robots_txt and self.config.base_url:
@@ -95,7 +94,6 @@ class ScraperEngine:
     async def _cleanup_resources(self):
         try: self.seen_hashes.save(self.bloom_path)
         except Exception: pass
-
         await self.checkpoint.close()
         if self.browser_manager: await self.browser_manager.close()
         if self.session: await self.session.close()
@@ -122,7 +120,6 @@ class ScraperEngine:
         raw_urls = self.config.start_urls or []
         all_urls = list(set([str(u) for u in raw_urls] + incomplete_urls))
         queue_urls = [u for u in all_urls if not self.checkpoint.is_done(u)]
-        
         if not queue_urls: return
 
         queue = asyncio.Queue()
@@ -152,7 +149,7 @@ class ScraperEngine:
             try:
                 html = await self._fetch_page(url)
                 if html:
-                    await self._process_content(html)
+                    await self._process_content(html, url)
                     await self.checkpoint.mark_done(url)
                     if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                 else:
@@ -178,7 +175,7 @@ class ScraperEngine:
                 html = await self._fetch_page(current_url)
                 if not html: raise Exception("Empty")
                 
-                resolver = await self._process_content(html)
+                resolver = await self._process_content(html, current_url)
                 await self.checkpoint.mark_done(current_url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                 
@@ -196,11 +193,41 @@ class ScraperEngine:
                 logger.error(f"Page failed: {e}")
                 break
 
-    async def _process_content(self, html: str) -> HtmlResolver:
+    async def _process_content(self, html: str, url: str = "") -> HtmlResolver:
         loop = asyncio.get_running_loop()
         data, resolver = await loop.run_in_executor(None, self._cpu_bound_extract, html)
+        
+        # --- Debug Logic ---
+        # Only check for snapshot if debug_mode is True
+        if self.config.debug_mode and url:
+            has_data = False
+            for val in data.values():
+                if val not in (None, "", []):
+                    has_data = True
+                    break
+            
+            if not has_data:
+                await self._save_debug_snapshot(html, url)
+        # -------------------
+
         await self._merge_data(data)
         return resolver
+
+    async def _save_debug_snapshot(self, html: str, url: str):
+        try:
+            debug_dir = Path("debug")
+            debug_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = hashlib.md5(url.encode()).hexdigest()[:8]
+            filename = debug_dir / f"fail_{timestamp}_{safe_name}.html"
+            
+            async with aiofiles.open(filename, "w", encoding="utf-8") as f:
+                await f.write(f"\n")
+                await f.write(html)
+            
+            logger.warning(f"📸 Snapshot saved: {filename}")
+        except Exception as e:
+            logger.error(f"Failed to save snapshot: {e}")
 
     def _cpu_bound_extract(self, html: str):
         resolver = HtmlResolver(html)
@@ -212,7 +239,6 @@ class ScraperEngine:
     async def _merge_data(self, page_data: Dict[str, Any]):
         batch_to_flush = None
         entries = 0
-        
         async with self.data_lock:
             for key, value in page_data.items():
                 if isinstance(value, list):
@@ -229,7 +255,6 @@ class ScraperEngine:
                             entries += 1
                 else:
                     self.pending_batch.append({key: value})
-            
             if len(self.pending_batch) >= self.batch_size:
                 batch_to_flush = self.pending_batch.copy()
                 self.pending_batch = []
@@ -258,7 +283,6 @@ class ScraperEngine:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
         current_proxy = self._get_next_proxy()
-        
         if self.browser_manager:
             return await self.browser_manager.fetch_page(url)
         else:
@@ -266,7 +290,6 @@ class ScraperEngine:
             try:
                 proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
                 self.session.cookies.clear()
-                
                 response = await self.session.get(url, timeout=15, proxies=proxies, headers={"User-Agent": self.ua_rotator.random})
                 if response.status_code == 200:
                     return response.text

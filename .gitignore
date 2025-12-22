@@ -215,3 +215,4 @@ data/*.json
 data/*.jsonl
 data/checkpoints.db
 debug/
+ignore_config/

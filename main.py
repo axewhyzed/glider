@@ -14,7 +14,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.console import Console
 
-from engine.schemas import ScraperConfig, StatsEvent  # Imported StatsEvent
+from engine.schemas import ScraperConfig, StatsEvent
 from engine.scraper import ScraperEngine
 from engine.utils import flatten_dict
 

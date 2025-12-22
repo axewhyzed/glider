@@ -9,8 +9,7 @@ import hashlib
 import math
 import os
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any
 
 class BloomFilter:
     """
@@ -82,4 +81,3 @@ class BloomFilter:
             
         with open(path, 'rb') as f:
             self.bit_array = bytearray(f.read())
-            # Note: We lose exact item_count on reload, but that's just a stat

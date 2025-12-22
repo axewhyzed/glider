@@ -7,6 +7,7 @@ from engine.utils import apply_transformers
 class HtmlResolver:
     """
     Parses HTML using Selectolax (CSS) with a lazy-loaded fallback to lxml (XPath).
+    Supports both text content and attribute extraction.
     """
     def __init__(self, html_content: str):
         self.raw_html = html_content
@@ -37,33 +38,47 @@ class HtmlResolver:
     def _extract_single(self, node: Any, field: DataField) -> Any:
         element = self._find_element(node, field.selectors)
         
-        # FIX: Explicit check for None. lxml elements with no children (text only)
-        # can evaluate to False in boolean contexts (len == 0).
         if element is None:
             return None
 
+        # If field has children, recurse into nested structure
         if field.children:
             result = {}
             for child in field.children:
                 result[child.name] = self.resolve_field(child, context=element)
             return result
         
-        raw_text = self._get_text(element)
-        return apply_transformers(raw_text, field.transformers)
+        # Extract attribute or text based on field configuration
+        if field.attribute:
+            raw_value = self._get_attribute(element, field.attribute)
+        else:
+            raw_value = self._get_text(element)
+        
+        # Apply transformers to extracted value
+        return apply_transformers(raw_value, field.transformers)
 
     def _extract_list(self, node: Any, field: DataField) -> List[Any]:
         elements = self._find_elements(node, field.selectors)
         results = []
+        
         for el in elements:
+            # If field has children, extract nested data
             if field.children:
                 row_data = {}
                 for child in field.children:
                     row_data[child.name] = self.resolve_field(child, context=el)
                 results.append(row_data)
             else:
-                raw_text = self._get_text(el)
-                cleaned_text = apply_transformers(raw_text, field.transformers)
-                results.append(cleaned_text)
+                # Extract attribute or text
+                if field.attribute:
+                    raw_value = self._get_attribute(el, field.attribute)
+                else:
+                    raw_value = self._get_text(el)
+                
+                # Apply transformers
+                cleaned_value = apply_transformers(raw_value, field.transformers)
+                results.append(cleaned_value)
+        
         return results
 
     def _find_element(self, node: Any, selectors: List[Selector]) -> Any:
@@ -107,26 +122,55 @@ class HtmlResolver:
         return []
 
     def _get_text(self, element: Any) -> str:
-        # FIX: Check if 'text' is callable. Selectolax has .text(), lxml has .text property.
+        """
+        Extract text content from an element.
+        Handles both Selectolax and lxml elements.
+        """
+        # Selectolax: has callable .text() method
         if hasattr(element, 'text') and callable(element.text):
             return str(element.text(strip=True))
             
-        # LXML handling: .text_content() gets inner text of element and children
+        # lxml: .text_content() gets inner text of element and children
         if hasattr(element, 'text_content'):
             return str(element.text_content().strip())
             
-        # Fallback for lxml elements where we just want the direct text
-        # We assume 'element.text' is truthy (not None) before stripping
+        # Fallback for lxml elements - direct text property
         if hasattr(element, 'text') and element.text:
             return str(element.text).strip()
             
         return str(element).strip()
 
+    def _get_attribute(self, element: Any, attribute: str) -> str:
+        """
+        Extract attribute value from an element.
+        Handles both Selectolax and lxml elements.
+        
+        Args:
+            element: The HTML element
+            attribute: Attribute name (e.g., 'href', 'src', 'data-id')
+            
+        Returns:
+            Attribute value as string, or empty string if not found
+        """
+        # Selectolax: uses .attributes dictionary
+        if hasattr(element, 'attributes'):
+            value = element.attributes.get(attribute)
+            return str(value) if value is not None else ""
+        
+        # lxml: uses .get() method
+        if hasattr(element, 'get'):
+            value = element.get(attribute)
+            return str(value) if value is not None else ""
+        
+        # Fallback
+        return ""
+
     def get_attribute(self, selector: Selector, attribute: str) -> Optional[str]:
+        """
+        Utility method to extract a single attribute value.
+        Used primarily for pagination links.
+        """
         element = self._find_element(None, [selector])
         if element:
-            if hasattr(element, 'attributes'): 
-                return element.attributes.get(attribute)
-            if hasattr(element, 'get'): 
-                return element.get(attribute)
+            return self._get_attribute(element, attribute) or None
         return None

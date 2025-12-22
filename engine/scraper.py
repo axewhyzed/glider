@@ -10,13 +10,28 @@ from itertools import cycle
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright, Page
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, wait_fixed, retry_if_exception_type
 from aiolimiter import AsyncLimiter
 from fake_useragent import UserAgent
+from pybloom_live import BloomFilter
 
 from engine.checkpoint import CheckpointManager
 from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
 from engine.resolver import HtmlResolver
+
+# Import StatsEvent from main
+try:
+    from main import StatsEvent
+except ImportError:
+    # Fallback for testing without main.py
+    from dataclasses import dataclass
+    from typing import Literal
+    
+    @dataclass
+    class StatsEvent:
+        event_type: Literal["page_success", "page_error", "page_skipped", "blocked", "entries_added"]
+        count: int = 1
+        metadata: Optional[Dict[str, Any]] = None
 
 # --- ROBUST STEALTH IMPORT (v1.0.6 Compatible) ---
 stealth_async: Optional[Callable[[Page], Awaitable[None]]] = None
@@ -41,12 +56,13 @@ if stealth_async and not callable(stealth_async):
 class ScraperEngine:
     """
     Core scraping engine handling resource management, concurrency, and parsing strategies.
+    Enhanced with micro-batched writes, bloom filter deduplication, and crash recovery.
     """
     def __init__(
         self, 
         config: ScraperConfig, 
         output_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-        stats_callback: Optional[Callable[[str], None]] = None
+        stats_callback: Optional[Callable[[StatsEvent], None]] = None
     ):
         self.config = config
         self.aggregated_data: Dict[str, Any] = {}
@@ -66,12 +82,20 @@ class ScraperEngine:
         
         # Concurrency & Safety
         self.data_lock = asyncio.Lock() 
-        self.seen_hashes = set() 
+        
+        # Memory-efficient deduplication with Bloom filter
+        self.seen_hashes = BloomFilter(capacity=100000, error_rate=0.001)
+        self.recent_hashes = []  # LRU cache for exact duplicates within same page
+        self.max_recent = 1000
+        
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
         self.ua_rotator = UserAgent()
         
         # Proxy Rotation
         self.proxy_pool = cycle(config.proxies) if config.proxies else None
+        
+        # Batching configuration
+        self.batch_size = 10  # Write every 10 items
 
     async def run(self) -> Dict[str, Any]:
         """Main entry point."""
@@ -81,10 +105,15 @@ class ScraperEngine:
         
         if self.config.respect_robots_txt and self.config.base_url:
             await self._init_robots_txt()
+        
+        # Check for incomplete URLs from previous crash
+        incomplete_urls = self.checkpoint.get_incomplete()
+        if incomplete_urls:
+            logger.warning(f"⚠️ Re-queueing {len(incomplete_urls)} incomplete URLs from previous session")
 
         try:
             if self.config.mode == ScrapeMode.LIST:
-                await self._run_list_mode()
+                await self._run_list_mode(incomplete_urls)
             else:
                 await self._run_pagination_mode()
         finally:
@@ -141,10 +170,14 @@ class ScraperEngine:
         while pages_scraped < max_pages and current_url:
             if not self._is_allowed(current_url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {current_url}")
-                if self.stats_callback: self.stats_callback("blocked")
+                if self.stats_callback: 
+                    self.stats_callback(StatsEvent("blocked"))
                 break
 
             logger.info(f"📄 Scraping Page {pages_scraped + 1}: {current_url}")
+            
+            # Mark as in-progress before processing
+            self.checkpoint.mark_in_progress(current_url)
             
             try:
                 html_content = await self._fetch_page(current_url)
@@ -152,8 +185,11 @@ class ScraperEngine:
                     raise Exception("Empty content")
                 
                 await self._process_content(html_content)
+                
+                # Mark as done after successful processing
                 self.checkpoint.mark_done(current_url)
-                if self.stats_callback: self.stats_callback("success")
+                if self.stats_callback: 
+                    self.stats_callback(StatsEvent("page_success"))
                 
                 pages_scraped += 1
                 if self.config.pagination and pages_scraped < max_pages:
@@ -172,12 +208,17 @@ class ScraperEngine:
             except Exception as e:
                 logger.error(f"❌ Failed to scrape {current_url}: {e}")
                 self.failed_urls.append(current_url)
-                if self.stats_callback: self.stats_callback("error")
+                if self.stats_callback: 
+                    self.stats_callback(StatsEvent("page_error"))
                 break
 
-    async def _run_list_mode(self):
+    async def _run_list_mode(self, incomplete_urls: List[str] = []):
         raw_urls = self.config.start_urls or []
         urls = [str(u) for u in raw_urls]
+        
+        # Add incomplete URLs from previous crash
+        if incomplete_urls:
+            urls = list(set(urls + incomplete_urls))
         
         if self.config.use_checkpointing:
             original_count = len(urls)
@@ -186,7 +227,7 @@ class ScraperEngine:
             if skipped > 0:
                 logger.info(f"⏭️ Skipping {skipped} URLs (already in checkpoint).")
                 if self.stats_callback: 
-                    for _ in range(skipped): self.stats_callback("skipped")
+                    self.stats_callback(StatsEvent("page_skipped", count=skipped))
 
         if not urls:
             logger.warning("⚠️ No URLs to process.")
@@ -198,24 +239,30 @@ class ScraperEngine:
         async def _worker(url):
             if not self._is_allowed(url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {url}")
-                if self.stats_callback: self.stats_callback("blocked")
+                if self.stats_callback: 
+                    self.stats_callback(StatsEvent("blocked"))
                 return
 
             async with sem:
                 async with self.rate_limiter:
+                    # Mark as in-progress
+                    self.checkpoint.mark_in_progress(url)
+                    
                     try:
                         logger.info(f"▶️ Fetching: {url}")
                         html = await self._fetch_page(url)
                         if html:
                             await self._process_content(html)
                             self.checkpoint.mark_done(url)
-                            if self.stats_callback: self.stats_callback("success")
+                            if self.stats_callback: 
+                                self.stats_callback(StatsEvent("page_success"))
                         else:
                             raise Exception("Empty HTML returned")
                     except Exception as e:
                         logger.error(f"Failed to fetch {url}: {e}")
                         self.failed_urls.append(url)
-                        if self.stats_callback: self.stats_callback("error")
+                        if self.stats_callback: 
+                            self.stats_callback(StatsEvent("page_error"))
                     
                     delay = random.uniform(0.5, 1.5)
                     await asyncio.sleep(delay)
@@ -266,28 +313,66 @@ class ScraperEngine:
         if self.session: await self.session.close()
 
     async def _handle_interactions(self, page):
+        """
+        Execute browser interactions with structured logging and retry logic.
+        Non-critical failures are logged but don't halt execution.
+        """
         if not self.config.interactions:
             return
 
-        for action in self.config.interactions:
+        total = len(self.config.interactions)
+        logger.info(f"🎮 Starting {total} browser interaction(s)...")
+        
+        successful = 0
+        failed = 0
+        
+        for idx, action in enumerate(self.config.interactions, 1):
             try:
-                if action.type == InteractionType.WAIT:
-                    await page.wait_for_timeout(action.duration or 1000)
-                elif action.type == InteractionType.SCROLL:
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await asyncio.sleep(1)
-                elif action.type == InteractionType.CLICK and action.selector:
-                    await page.click(action.selector)
-                elif action.type == InteractionType.FILL and action.selector and action.value:
-                    await page.fill(action.selector, action.value)
-                elif action.type == InteractionType.PRESS and action.selector and action.value:
-                    await page.press(action.selector, action.value)
-                elif action.type == InteractionType.HOVER and action.selector:
-                    await page.hover(action.selector)
-                elif action.type == InteractionType.KEY_PRESS and action.value:
-                    await page.keyboard.press(action.value)
+                await self._execute_interaction(page, action, idx, total)
+                successful += 1
             except Exception as e:
-                logger.warning(f"⚠️ Interaction failed ({action.type}): {e}")
+                failed += 1
+                logger.warning(
+                    f"  ⚠️  [{idx}/{total}] Interaction failed ({action.type}): {e}"
+                )
+                # Continue with next interaction instead of crashing
+                continue
+        
+        logger.info(f"✅ Interactions complete: {successful} succeeded, {failed} failed")
+
+    @retry(stop=stop_after_attempt(2), wait=wait_fixed(1), reraise=True)
+    async def _execute_interaction(self, page, action, idx: int, total: int):
+        """Execute single interaction with retry logic."""
+        
+        if action.type == InteractionType.WAIT:
+            duration_ms = action.duration or 1000
+            logger.debug(f"  [{idx}/{total}] ⏳ Waiting {duration_ms}ms...")
+            await page.wait_for_timeout(duration_ms)
+            
+        elif action.type == InteractionType.SCROLL:
+            logger.debug(f"  [{idx}/{total}] 📜 Scrolling to bottom...")
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.5)
+            
+        elif action.type == InteractionType.CLICK and action.selector:
+            logger.debug(f"  [{idx}/{total}] 👆 Clicking: {action.selector}")
+            await page.click(action.selector, timeout=5000)
+            
+        elif action.type == InteractionType.FILL and action.selector and action.value:
+            logger.debug(f"  [{idx}/{total}] ✍️  Filling '{action.selector}' with '{action.value}'")
+            await page.fill(action.selector, action.value, timeout=5000)
+            
+        elif action.type == InteractionType.PRESS and action.selector and action.value:
+            logger.debug(f"  [{idx}/{total}] ⌨️  Pressing '{action.value}' on {action.selector}")
+            await page.press(action.selector, action.value, timeout=5000)
+            
+        elif action.type == InteractionType.HOVER and action.selector:
+            logger.debug(f"  [{idx}/{total}] 🖱️  Hovering: {action.selector}")
+            await page.hover(action.selector, timeout=5000)
+            
+        elif action.type == InteractionType.KEY_PRESS and action.value:
+            logger.debug(f"  [{idx}/{total}] ⌨️  Global key press: {action.value}")
+            await page.keyboard.press(action.value)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
@@ -346,18 +431,72 @@ class ScraperEngine:
         return data
 
     async def _merge_data(self, page_data: Dict[str, Any]):
-        async with self.data_lock: 
+        """
+        Merge extracted data with atomic per-item streaming.
+        Uses micro-batching to reduce I/O overhead.
+        """
+        entries_added = 0
+        batch_items = []  # Collect items for batched write
+        
+        async with self.data_lock:
             for key, value in page_data.items():
                 if key not in self.aggregated_data:
-                    self.aggregated_data[key] = value
+                    self.aggregated_data[key] = value if not isinstance(value, list) else []
+                
+                target = self.aggregated_data[key]
+                
+                if isinstance(target, list) and isinstance(value, list):
+                    for item in value:
+                        item_hash = hashlib.md5(
+                            json.dumps(item, sort_keys=True).encode()
+                        ).hexdigest()
+                        
+                        # Bloom filter check (probabilistic)
+                        if item_hash not in self.seen_hashes:
+                            # Check exact match in recent cache
+                            if item_hash in self.recent_hashes:
+                                continue  # Skip duplicate
+                            
+                            target.append(item)
+                            self.seen_hashes.add(item_hash)
+                            entries_added += 1
+                            
+                            # LRU maintenance
+                            self.recent_hashes.append(item_hash)
+                            if len(self.recent_hashes) > self.max_recent:
+                                self.recent_hashes.pop(0)
+                            
+                            # Add to batch instead of immediate write
+                            batch_items.append({key: [item]})
+                            
+                            # Flush batch every N items
+                            if len(batch_items) >= self.batch_size:
+                                await self._flush_batch(batch_items)
+                                batch_items = []
                 else:
-                    target = self.aggregated_data[key]
-                    if isinstance(target, list) and isinstance(value, list):
-                        for item in value:
-                            item_hash = hashlib.md5(json.dumps(item, sort_keys=True).encode()).hexdigest()
-                            if item_hash not in self.seen_hashes:
-                                target.append(item)
-                                self.seen_hashes.add(item_hash)
+                    # Non-list fields written immediately
+                    if self.output_callback:
+                        await self.output_callback({key: value})
             
-            if self.output_callback:
-                await self.output_callback(page_data)
+            # Flush remaining items
+            if batch_items:
+                await self._flush_batch(batch_items)
+        
+        # Update stats with precise entry count
+        if self.stats_callback and entries_added > 0:
+            self.stats_callback(StatsEvent("entries_added", count=entries_added))
+
+    async def _flush_batch(self, batch: List[Dict[str, Any]]):
+        """Write batched items in a single I/O operation."""
+        if not self.output_callback:
+            return
+        
+        # Combine all items into single payload
+        combined = {}
+        for item in batch:
+            for k, v in item.items():
+                if k not in combined:
+                    combined[k] = []
+                combined[k].extend(v)
+        
+        await self.output_callback(combined)

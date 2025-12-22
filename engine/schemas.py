@@ -23,8 +23,8 @@ class InteractionType(str, Enum):
     SCROLL = "scroll"
     FILL = "fill"
     PRESS = "press"
-    HOVER = "hover"      # NEW
-    KEY_PRESS = "key"    # NEW
+    HOVER = "hover"
+    KEY_PRESS = "key"
 
 class Transformer(BaseModel):
     name: TransformerType
@@ -42,11 +42,39 @@ class Interaction(BaseModel):
     duration: Optional[int] = None # Duration for wait (ms)
 
 class DataField(BaseModel):
+    """
+    Defines a field to extract from HTML.
+    
+    Examples:
+        # Extract text content:
+        {"name": "title", "selectors": [{"type": "css", "value": "h1"}]}
+        
+        # Extract href attribute:
+        {"name": "link", "selectors": [{"type": "css", "value": "a"}], "attribute": "href"}
+        
+        # Extract image src:
+        {"name": "image_url", "selectors": [{"type": "css", "value": "img.product"}], "attribute": "src"}
+        
+        # Extract data attribute:
+        {"name": "product_id", "selectors": [{"type": "css", "value": "div.item"}], "attribute": "data-id"}
+    """
     name: str
     selectors: List[Selector]
     is_list: bool = False
+    attribute: Optional[str] = Field(default=None, description="HTML attribute to extract (e.g., 'href', 'src', 'data-id'). If None, extracts text content.")
     transformers: List[Transformer] = []
-    children: Optional[List['DataField']] = None 
+    children: Optional[List['DataField']] = None
+    
+    @field_validator('attribute')
+    @classmethod
+    def validate_attribute(cls, v):
+        """Ensure attribute names are valid if provided."""
+        if v is not None:
+            # Strip whitespace and convert to lowercase for consistency
+            v = v.strip().lower()
+            if not v:
+                return None  # Empty string treated as None
+        return v
 
 class Pagination(BaseModel):
     selector: Selector

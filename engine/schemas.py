@@ -40,8 +40,6 @@ class Transformer(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def parse_shorthand(cls, data: Any) -> Any:
-        # STRICT NORMALIZATION: Convert string shorthand to object immediately.
-        # The system will ONLY ever see Transformer objects, never strings.
         if isinstance(data, str):
             return {"name": data, "args": []}
         return data
@@ -53,7 +51,6 @@ class Selector(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def parse_shorthand(cls, data: Any) -> Any:
-        # STRICT NORMALIZATION: Convert string "div.foo" to {"type": "css", "value": "div.foo"}
         if isinstance(data, str):
             return {"type": "css", "value": data}
         return data
@@ -66,43 +63,25 @@ class Interaction(BaseModel):
 
 class DataField(BaseModel):
     name: str
-    
-    # Input-only shorthand. Will be None at runtime.
     selector: Optional[Any] = Field(default=None, exclude=True) 
-    
-    # The Single Source of Truth
     selectors: List[Selector] = Field(default=[])
-    
     is_list: bool = False
     attribute: Optional[str] = None
-    
-    # Strict typing: Engine will always receive objects, never strings
     transformers: List[Transformer] = []
-    
     children: Optional[List['DataField']] = None
     
     @model_validator(mode='before')
     @classmethod
     def normalize_selectors(cls, data: Any) -> Any:
-        """
-        Merges 'selector' (singular) into 'selectors' (list) and clears 'selector'.
-        This ensures the engine only has ONE place to look (the list).
-        """
         if isinstance(data, dict):
             single = data.get('selector')
             existing = data.get('selectors', [])
-            
-            # If user provided a list for 'selector' by mistake, handle it
             if single:
                 if isinstance(single, list):
                     existing = single + existing
                 else:
                     existing.insert(0, single)
-                
-                # CRITICAL: Clear the shorthand so it doesn't exist at runtime.
-                # This prevents "double-source" ambiguity.
                 data['selector'] = None
-            
             data['selectors'] = existing
         return data
 
@@ -112,10 +91,8 @@ class DataField(BaseModel):
         return v.strip().lower() if v and v.strip() else None
 
 class Pagination(BaseModel):
-    # Selector validator handles the string->object conversion
     selector: Selector
     max_pages: int = 5
-    
     @field_validator('max_pages')
     @classmethod
     def check_max_pages(cls, v):
@@ -128,7 +105,9 @@ class ScraperConfig(BaseModel):
     mode: ScrapeMode = ScrapeMode.PAGINATION
     start_urls: Optional[List[HttpUrl]] = []
     
+    # Engine Settings
     use_playwright: bool = False
+    debug_mode: bool = False  # <--- NEW FLAG
     concurrency: int = 2
     rate_limit: int = 5
     min_delay: int = 1

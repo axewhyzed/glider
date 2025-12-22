@@ -1,5 +1,6 @@
 aiofiles==25.1.0
 aiolimiter==1.2.1
+aiosqlite==0.22.0
 annotated-types==0.7.0
 certifi==2025.11.12
 cffi==2.0.0

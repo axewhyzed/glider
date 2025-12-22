@@ -1,55 +1,18 @@
 {
-  "name": "Attribute Extraction Example",
-  "base_url": "https://books.toscrape.com/",
-  "mode": "pagination",
-  "rate_limit": 2,
-  "use_checkpointing": false,
-  "respect_robots_txt": true,
-  
+  "name": "image_scraper",
+  "base_url": "http://books.toscrape.com",
   "fields": [
     {
-      "name": "books",
+      "name": "images",
+      "selector": "div.image_container img",
       "is_list": true,
-      "selectors": [{"type": "css", "value": "article.product_pod"}],
-      "children": [
-        {
-          "name": "title",
-          "selectors": [{"type": "css", "value": "h3 a"}],
-          "comment": "Extracts text content (default behavior)"
-        },
-        {
-          "name": "title_link",
-          "selectors": [{"type": "css", "value": "h3 a"}],
-          "attribute": "href",
-          "comment": "Extracts href attribute - NEW FEATURE!"
-        },
-        {
-          "name": "image_url",
-          "selectors": [{"type": "css", "value": "div.image_container img"}],
-          "attribute": "src",
-          "comment": "Extracts src attribute from image tag"
-        },
-        {
-          "name": "price",
-          "selectors": [{"type": "css", "value": "p.price_color"}],
-          "transformers": [{"name": "to_float"}]
-        },
-        {
-          "name": "availability",
-          "selectors": [{"type": "css", "value": "p.availability"}]
-        },
-        {
-          "name": "rating",
-          "selectors": [{"type": "css", "value": "p.star-rating"}],
-          "attribute": "class",
-          "comment": "Extracts class attribute (e.g., 'star-rating Three')"
-        }
-      ]
+      "attribute": "src",
+      "transformers": ["strip"]
+    },
+    {
+      "name": "page_link",
+      "selector": "ul.breadcrumb li:last-child",
+      "transformers": ["strip"]
     }
-  ],
-  
-  "pagination": {
-    "selector": {"type": "css", "value": "li.next a"},
-    "max_pages": 3
-  }
+  ]
 }

@@ -1,176 +1,114 @@
-from typing import List, Optional, Any
-from selectolax.lexbor import LexborHTMLParser
 from lxml import html as lxml_html
-from engine.schemas import DataField, Selector, SelectorType
+from typing import Any, List, Optional
+from engine.schemas import DataField, SelectorType
 from engine.utils import apply_transformers
 
 class HtmlResolver:
     """
-    Parses HTML using Selectolax (CSS) with a lazy-loaded fallback to lxml (XPath).
-    Supports both text content and attribute extraction.
+    Parses HTML and resolves DataFields using CSS/XPath selectors.
+    Strictly uses the normalized 'selectors' list.
     """
     def __init__(self, html_content: str):
-        self.raw_html = html_content
-        self._parser = None
-        self._lxml_tree = None
+        self.tree = lxml_html.fromstring(html_content)
 
-    @property
-    def parser(self):
-        """Lazy load Selectolax only if CSS is requested."""
-        if self._parser is None:
-            self._parser = LexborHTMLParser(self.raw_html)
-        return self._parser
-
-    @property
-    def lxml_tree(self):
-        """Lazy load lxml only if XPath is requested."""
-        if self._lxml_tree is None:
-            self._lxml_tree = lxml_html.fromstring(self.raw_html)
-        return self._lxml_tree
-
-    def resolve_field(self, field: DataField, context: Any = None) -> Any:
-        node = context 
-        if field.is_list:
-            return self._extract_list(node, field)
-        else:
-            return self._extract_single(node, field)
-
-    def _extract_single(self, node: Any, field: DataField) -> Any:
-        element = self._find_element(node, field.selectors)
-        
-        if element is None:
-            return None
-
-        # If field has children, recurse into nested structure
-        if field.children:
-            result = {}
-            for child in field.children:
-                result[child.name] = self.resolve_field(child, context=element)
-            return result
-        
-        # Extract attribute or text based on field configuration
-        if field.attribute:
-            raw_value = self._get_attribute(element, field.attribute)
-        else:
-            raw_value = self._get_text(element)
-        
-        # Apply transformers to extracted value
-        return apply_transformers(raw_value, field.transformers)
-
-    def _extract_list(self, node: Any, field: DataField) -> List[Any]:
-        elements = self._find_elements(node, field.selectors)
+    def resolve_field(self, field: DataField) -> Any:
+        """
+        Resolves a single field.
+        If field.is_list=True, returns a list of results.
+        Otherwise, returns the first match.
+        """
         results = []
-        
-        for el in elements:
-            # If field has children, extract nested data
-            if field.children:
-                row_data = {}
-                for child in field.children:
-                    row_data[child.name] = self.resolve_field(child, context=el)
-                results.append(row_data)
-            else:
-                # Extract attribute or text
-                if field.attribute:
-                    raw_value = self._get_attribute(el, field.attribute)
-                else:
-                    raw_value = self._get_text(el)
+
+        # STABILITY: We only look at 'selectors'. The shorthand 'selector'
+        # was merged into this list by the Schema Validator.
+        for selector in field.selectors:
+            found_elements = self._select_elements(self.tree, selector.type, selector.value)
+            
+            if found_elements:
+                for el in found_elements:
+                    extracted_val = self._extract_value(el, field)
+                    if extracted_val is not None:
+                        results.append(extracted_val)
                 
-                # Apply transformers
-                cleaned_value = apply_transformers(raw_value, field.transformers)
-                results.append(cleaned_value)
+                # If we found data with this selector, we stop (Priority Order)
+                if results:
+                    break
         
-        return results
+        # Handle Children (Nested Scraping)
+        if field.children and results:
+             # We need to resolve children against the elements found, not the extracted strings.
+             # This requires re-selecting or passing elements.
+             # For the sake of this logic, we assume results are elements if children exist.
+             # However, _extract_value returns strings usually. 
+             # We need to ensure we pass elements for child resolution.
+             # Note: logic inside _extract_value handles this return type.
+             return self._resolve_children(field, results) 
+        
+        if field.is_list:
+            return results
+        return results[0] if results else None
 
-    def _find_element(self, node: Any, selectors: List[Selector]) -> Any:
-        for s in selectors:
-            if s.type == SelectorType.CSS:
-                current_node = node if node else self.parser.root
-                if current_node and hasattr(current_node, 'css_first'):
-                    res = current_node.css_first(s.value)
-                    if res: return res
-            elif s.type == SelectorType.XPATH:
-                if node and hasattr(node, 'xpath'):
-                    try:
-                        results = node.xpath(s.value)
-                        if results: return results[0]
-                    except Exception: continue
-                else:
-                    try:
-                        results = self.lxml_tree.xpath(s.value)
-                        if results: return results[0]
-                    except Exception: continue
-        return None
-
-    def _find_elements(self, node: Any, selectors: List[Selector]) -> List[Any]:
-        for s in selectors:
-            if s.type == SelectorType.CSS:
-                current_node = node if node else self.parser.root
-                if current_node and hasattr(current_node, 'css'):
-                    res = current_node.css(s.value)
-                    if res: return res
-            elif s.type == SelectorType.XPATH:
-                if node and hasattr(node, 'xpath'):
-                    try:
-                        results = node.xpath(s.value)
-                        if results: return results
-                    except Exception: continue
-                else:
-                    try:
-                        results = self.lxml_tree.xpath(s.value)
-                        if results: return results
-                    except Exception: continue
+    def _select_elements(self, element, type_: SelectorType, value: str) -> List[Any]:
+        try:
+            if type_ == SelectorType.CSS:
+                return element.cssselect(value)
+            elif type_ == SelectorType.XPATH:
+                return element.xpath(value)
+        except Exception:
+            return []
         return []
 
-    def _get_text(self, element: Any) -> str:
-        """
-        Extract text content from an element.
-        Handles both Selectolax and lxml elements.
-        """
-        # Selectolax: has callable .text() method
-        if hasattr(element, 'text') and callable(element.text):
-            return str(element.text(strip=True))
+    def _extract_value(self, element, field: DataField) -> Any:
+        """Extracts text or attribute, applying transformers."""
+        # If we have children, we return the element itself to process sub-fields
+        if field.children:
+            return element
             
-        # lxml: .text_content() gets inner text of element and children
-        if hasattr(element, 'text_content'):
-            return str(element.text_content().strip())
+        val = ""
+        if field.attribute:
+            val = element.get(field.attribute, "")
+        else:
+            val = element.text_content()
             
-        # Fallback for lxml elements - direct text property
-        if hasattr(element, 'text') and element.text:
-            return str(element.text).strip()
-            
-        return str(element).strip()
+        return apply_transformers(val, field.transformers)
 
-    def _get_attribute(self, element: Any, attribute: str) -> str:
-        """
-        Extract attribute value from an element.
-        Handles both Selectolax and lxml elements.
-        
-        Args:
-            element: The HTML element
-            attribute: Attribute name (e.g., 'href', 'src', 'data-id')
+    def _resolve_children(self, parent_field: DataField, elements: List[Any]) -> Any:
+        """Process nested fields for each parent element found."""
+        extracted_data = []
+        for el in elements:
+            row_data = {}
+            # FIX: Explicitly handle None for Pylance safety
+            children = parent_field.children or []
+            for child in children:
+                child_val = self._resolve_child_field(el, child)
+                row_data[child.name] = child_val
+            extracted_data.append(row_data)
             
-        Returns:
-            Attribute value as string, or empty string if not found
-        """
-        # Selectolax: uses .attributes dictionary
-        if hasattr(element, 'attributes'):
-            value = element.attributes.get(attribute)
-            return str(value) if value is not None else ""
-        
-        # lxml: uses .get() method
-        if hasattr(element, 'get'):
-            value = element.get(attribute)
-            return str(value) if value is not None else ""
-        
-        # Fallback
-        return ""
+        if parent_field.is_list:
+            return extracted_data
+        return extracted_data[0] if extracted_data else None
 
-    def get_attribute(self, selector: Selector, attribute: str) -> Optional[str]:
-        """
-        Utility method to extract a single attribute value.
-        Used primarily for pagination links.
-        """
-        element = self._find_element(None, [selector])
-        if element:
-            return self._get_attribute(element, attribute) or None
+    def _resolve_child_field(self, parent_element, field: DataField) -> Any:
+        """Similar to resolve_field but scoped to a parent element."""
+        results = []
+        for selector in field.selectors:
+            found = self._select_elements(parent_element, selector.type, selector.value)
+            for item in found:
+                val = self._extract_value(item, field)
+                if val is not None:
+                    results.append(val)
+            if results: break
+            
+        if field.children and results:
+             return self._resolve_children(field, results)
+
+        if field.is_list:
+            return results
+        return results[0] if results else None
+    
+    def get_attribute(self, selector_obj, attribute: str) -> Optional[str]:
+        """Helper for pagination to quickly get an attribute."""
+        elements = self._select_elements(self.tree, selector_obj.type, selector_obj.value)
+        if elements:
+            return elements[0].get(attribute)
         return None

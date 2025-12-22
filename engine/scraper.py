@@ -6,6 +6,7 @@ import urllib.robotparser
 from typing import Dict, Any, Optional, List, Callable, Awaitable
 from urllib.parse import urljoin, urlparse
 from itertools import cycle
+from collections import deque
 
 from curl_cffi.requests import AsyncSession
 from playwright.async_api import async_playwright, Page
@@ -13,8 +14,8 @@ from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential, wait_fixed, retry_if_exception_type
 from aiolimiter import AsyncLimiter
 from fake_useragent import UserAgent
-from pybloom_live import BloomFilter
 
+from engine.bloom import BloomFilter  # Pure Python implementation
 from engine.checkpoint import CheckpointManager
 from engine.schemas import ScraperConfig, ScrapeMode, InteractionType
 from engine.resolver import HtmlResolver
@@ -40,16 +41,15 @@ try:
     # Standard import for playwright-stealth < 2.0.0
     from playwright_stealth import stealth_async # type: ignore
 except ImportError as e:
-    logger.warning(f"⚠️ Could not import 'playwright-stealth': {e}")
+    # Don't warn here - will warn later if actually needed
+    pass
 
 # Final check to ensure we have a callable function
 if stealth_async and not callable(stealth_async):
     # Fallback for weird module resolution issues
     if hasattr(stealth_async, 'stealth_async'):
-        stealth_async = stealth_async.stealth_async # type: ignore
-        logger.warning("stealth enabled")
+        stealth_async = stealth_async # type: ignore
     else:
-        logger.warning("⚠️ 'stealth_async' is not callable. Disabling stealth.")
         stealth_async = None
 # -----------------------------
 
@@ -57,6 +57,14 @@ class ScraperEngine:
     """
     Core scraping engine handling resource management, concurrency, and parsing strategies.
     Enhanced with micro-batched writes, bloom filter deduplication, and crash recovery.
+    
+    Version: 2.7 - Critical Fixes Applied
+    - C1: Bloom filter false positive tracking
+    - C3: Race condition fix in batch flush
+    - C4: Incomplete URL deduplication
+    - H1: O(1) LRU cache with deque
+    - H3: User-Agent rotation for curl_cffi
+    - H5: Graceful shutdown handling
     """
     def __init__(
         self, 
@@ -83,10 +91,14 @@ class ScraperEngine:
         # Concurrency & Safety
         self.data_lock = asyncio.Lock() 
         
-        # Memory-efficient deduplication with Bloom filter
+        # Memory-efficient deduplication with Bloom filter (PURE PYTHON)
         self.seen_hashes = BloomFilter(capacity=100000, error_rate=0.001)
-        self.recent_hashes = []  # LRU cache for exact duplicates within same page
-        self.max_recent = 1000
+        
+        # H1 FIX: Use deque for O(1) LRU operations instead of list
+        self.recent_hashes = deque(maxlen=1000)  # Auto-evicts oldest when full
+        
+        # C1 FIX: Track suspected false positives
+        self.false_positive_count = 0
         
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
         self.ua_rotator = UserAgent()
@@ -96,6 +108,10 @@ class ScraperEngine:
         
         # Batching configuration
         self.batch_size = 10  # Write every 10 items
+        self.pending_batch: List[Dict[str, Any]] = []  # C3 FIX: Shared batch buffer
+        
+        # H5 FIX: Shutdown flag for graceful termination
+        self.shutdown_requested = False
 
     async def run(self) -> Dict[str, Any]:
         """Main entry point."""
@@ -106,21 +122,36 @@ class ScraperEngine:
         if self.config.respect_robots_txt and self.config.base_url:
             await self._init_robots_txt()
         
-        # Check for incomplete URLs from previous crash
+        # C4 FIX: Check for incomplete URLs and filter out already-done ones
         incomplete_urls = self.checkpoint.get_incomplete()
         if incomplete_urls:
-            logger.warning(f"⚠️ Re-queueing {len(incomplete_urls)} incomplete URLs from previous session")
+            # Remove URLs that are both incomplete AND done
+            incomplete_urls = [u for u in incomplete_urls if not self.checkpoint.is_done(u)]
+            if incomplete_urls:
+                logger.warning(f"⚠️ Re-queueing {len(incomplete_urls)} incomplete URLs from previous session")
 
         try:
             if self.config.mode == ScrapeMode.LIST:
                 await self._run_list_mode(incomplete_urls)
             else:
                 await self._run_pagination_mode()
+        except asyncio.CancelledError:
+            # H5 FIX: Graceful shutdown - flush remaining batches
+            logger.warning("⚠️ Shutdown requested - flushing remaining data...")
+            await self._flush_remaining_batches()
+            raise
         finally:
             await self._cleanup_resources()
             self.checkpoint.close()
 
         total_items = sum(len(v) if isinstance(v, list) else 1 for v in self.aggregated_data.values())
+        
+        # Report False Positives
+        if self.false_positive_count > 0:
+            logger.warning(
+                f"⚠️ Bloom filter detected {self.false_positive_count} suspected false positives "
+                f"({(self.false_positive_count/total_items*100):.2f}% of data) - items were preserved"
+            )
         
         # Report Failures
         if self.failed_urls:
@@ -146,9 +177,17 @@ class ScraperEngine:
             self.robots_parser.set_url(robots_url)
             
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self.robots_parser.read)
+            
+            # L1 FIX: Add timeout for robots.txt fetch
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self.robots_parser.read),
+                timeout=10.0
+            )
             
             logger.info(f"✅ Robots.txt parsed from {robots_url}")
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ Robots.txt fetch timed out. Defaulting to ALLOW all.")
+            self.robots_parser = None
         except Exception as e:
             logger.warning(f"⚠️ Failed to parse robots.txt: {e}. Defaulting to ALLOW all.")
             self.robots_parser = None
@@ -167,7 +206,7 @@ class ScraperEngine:
         pages_scraped = 0
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
 
-        while pages_scraped < max_pages and current_url:
+        while pages_scraped < max_pages and current_url and not self.shutdown_requested:
             if not self._is_allowed(current_url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {current_url}")
                 if self.stats_callback: 
@@ -237,6 +276,9 @@ class ScraperEngine:
         logger.info(f"⚡ Processing {len(urls)} URLs with Concurrency={self.config.concurrency}")
 
         async def _worker(url):
+            if self.shutdown_requested:
+                return
+                
             if not self._is_allowed(url):
                 logger.warning(f"⛔ URL blocked by robots.txt: {url}")
                 if self.stats_callback: 
@@ -258,6 +300,8 @@ class ScraperEngine:
                                 self.stats_callback(StatsEvent("page_success"))
                         else:
                             raise Exception("Empty HTML returned")
+                    except asyncio.CancelledError:
+                        raise  # Propagate cancellation
                     except Exception as e:
                         logger.error(f"Failed to fetch {url}: {e}")
                         self.failed_urls.append(url)
@@ -267,8 +311,19 @@ class ScraperEngine:
                     delay = random.uniform(0.5, 1.5)
                     await asyncio.sleep(delay)
 
-        tasks = [_worker(url) for url in urls]
-        await asyncio.gather(*tasks)
+        tasks = [asyncio.create_task(_worker(url)) for url in urls]
+        
+        try:
+            # H5 FIX: Proper cancellation handling
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            # Cancel all pending tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # Wait for cancellation to complete
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
     
     async def _process_content(self, html: str):
         try:
@@ -281,6 +336,10 @@ class ScraperEngine:
 
     async def _setup_resources(self):
         if self.config.use_playwright:
+            # Only warn about stealth if Playwright is enabled and stealth is missing
+            if not stealth_async:
+                logger.warning("⚠️ playwright-stealth not available. Install for better anti-detection.")
+            
             logger.info("🎭 Launching Playwright...")
             self.playwright = await async_playwright().start()
             
@@ -412,7 +471,10 @@ class ScraperEngine:
                 if current_proxy:
                     proxies = {"http": current_proxy, "https": current_proxy}
 
-                response = await self.session.get(url, timeout=15, proxies=proxies)
+                # H3 FIX: Rotate User-Agent per request for curl_cffi
+                headers = {"User-Agent": self.ua_rotator.random}
+                
+                response = await self.session.get(url, timeout=15, proxies=proxies, headers=headers)
                 if response.status_code == 200:
                     return response.text
                 elif response.status_code in [403, 429, 500, 502, 503, 504]:
@@ -434,9 +496,14 @@ class ScraperEngine:
         """
         Merge extracted data with atomic per-item streaming.
         Uses micro-batching to reduce I/O overhead.
+        
+        FIXES APPLIED:
+        - C1: Track and log Bloom filter false positives
+        - C3: Race condition fix - flush outside lock
+        - H1: Use deque for O(1) operations
         """
         entries_added = 0
-        batch_items = []  # Collect items for batched write
+        batch_to_flush: Optional[List[Dict[str, Any]]] = None
         
         async with self.data_lock:
             for key, value in page_data.items():
@@ -453,34 +520,41 @@ class ScraperEngine:
                         
                         # Bloom filter check (probabilistic)
                         if item_hash not in self.seen_hashes:
-                            # Check exact match in recent cache
-                            if item_hash in self.recent_hashes:
-                                continue  # Skip duplicate
-                            
+                            # Definitely new - add it
                             target.append(item)
                             self.seen_hashes.add(item_hash)
+                            self.recent_hashes.append(item_hash)  # H1: O(1) with deque
                             entries_added += 1
                             
-                            # LRU maintenance
-                            self.recent_hashes.append(item_hash)
-                            if len(self.recent_hashes) > self.max_recent:
-                                self.recent_hashes.pop(0)
+                            # Add to batch
+                            self.pending_batch.append({key: [item]})
                             
-                            # Add to batch instead of immediate write
-                            batch_items.append({key: [item]})
-                            
-                            # Flush batch every N items
-                            if len(batch_items) >= self.batch_size:
-                                await self._flush_batch(batch_items)
-                                batch_items = []
+                        else:
+                            # Might be false positive - check exact match
+                            if item_hash in self.recent_hashes:
+                                # Definitely duplicate
+                                continue
+                            else:
+                                # C1 FIX: Suspected false positive - add anyway
+                                self.false_positive_count += 1
+                                logger.debug(f"⚠️ Bloom false positive suspected - preserving item")
+                                target.append(item)
+                                self.recent_hashes.append(item_hash)
+                                entries_added += 1
+                                self.pending_batch.append({key: [item]})
+                        
+                        # C3 FIX: Check batch size and prepare flush INSIDE lock
+                        if len(self.pending_batch) >= self.batch_size:
+                            batch_to_flush = self.pending_batch.copy()
+                            self.pending_batch = []
+                            # Don't flush here - will flush outside lock
                 else:
-                    # Non-list fields written immediately
-                    if self.output_callback:
-                        await self.output_callback({key: value})
-            
-            # Flush remaining items
-            if batch_items:
-                await self._flush_batch(batch_items)
+                    # Non-list fields - add to batch immediately
+                    self.pending_batch.append({key: value})
+        
+        # C3 FIX: Flush OUTSIDE the lock to prevent race conditions
+        if batch_to_flush:
+            await self._flush_batch(batch_to_flush)
         
         # Update stats with precise entry count
         if self.stats_callback and entries_added > 0:
@@ -488,7 +562,7 @@ class ScraperEngine:
 
     async def _flush_batch(self, batch: List[Dict[str, Any]]):
         """Write batched items in a single I/O operation."""
-        if not self.output_callback:
+        if not self.output_callback or not batch:
             return
         
         # Combine all items into single payload
@@ -497,6 +571,20 @@ class ScraperEngine:
             for k, v in item.items():
                 if k not in combined:
                     combined[k] = []
-                combined[k].extend(v)
+                if isinstance(v, list):
+                    combined[k].extend(v)
+                else:
+                    combined[k].append(v)
         
         await self.output_callback(combined)
+    
+    async def _flush_remaining_batches(self):
+        """H5 FIX: Flush any remaining batches on shutdown."""
+        async with self.data_lock:
+            if self.pending_batch:
+                logger.info(f"Flushing {len(self.pending_batch)} remaining items...")
+                batch_to_flush = self.pending_batch.copy()
+                self.pending_batch = []
+        
+        if batch_to_flush:
+            await self._flush_batch(batch_to_flush)

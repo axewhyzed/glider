@@ -105,6 +105,12 @@ def setup_logging():
     )
 
 def save_to_file(data: dict, config_name: str):
+    """
+    Save scraped data to JSON and CSV files.
+    
+    C2 FIX: Added os.fsync() to ensure data is persisted to disk immediately,
+    preventing total data loss on crashes during final write phase.
+    """
     output_dir = Path("data")
     output_dir.mkdir(exist_ok=True)
 
@@ -112,38 +118,49 @@ def save_to_file(data: dict, config_name: str):
     safe_name = config_name.replace(" ", "_").lower()
     base_filename = f"{safe_name}_{timestamp}"
 
-    # 1. Save Full JSON
+    # 1. Save Full JSON with fsync
     json_path = output_dir / f"{base_filename}.json"
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()  # Flush Python buffer
+        os.fsync(f.fileno())  # C2 FIX: Force OS to write to disk
+    
+    console.print(f"   [green]✅ JSON saved to {json_path}[/green]")
     
     # 2. Save CSV (Robust Selection)
-    # Find the longest list to assume it's the main data table
+    # H2 FIX: Use first list found, not longest (prevents tags > servers issue)
     best_key = None
-    max_len = 0
     for key, value in data.items():
-        if isinstance(value, list) and len(value) > max_len:
-            if len(value) > 0 and isinstance(value[0], dict):
-                best_key = key
-                max_len = len(value)
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            best_key = key
+            break  # Use first found, not longest
     
     if best_key:
         csv_path = output_dir / f"{base_filename}.csv"
         raw_items = data[best_key]
-        flat_items = [flatten_dict(item) for item in raw_items]
         
-        if flat_items:
-            # Collect ALL keys from ALL items to handle heterogeneous data
-            all_keys = set()
-            for item in flat_items:
-                all_keys.update(item.keys())
-            fieldnames = sorted(list(all_keys))
+        try:
+            flat_items = [flatten_dict(item) for item in raw_items]
             
-            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(flat_items)
-            console.print(f"   [green]CSV saved to {csv_path}[/green]")
+            if flat_items:
+                # Collect ALL keys from ALL items to handle heterogeneous data
+                all_keys = set()
+                for item in flat_items:
+                    all_keys.update(item.keys())
+                fieldnames = sorted(list(all_keys))
+                
+                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(flat_items)
+                    f.flush()
+                    os.fsync(f.fileno())  # C2 FIX: Force OS to write to disk
+                
+                console.print(f"   [green]✅ CSV saved to {csv_path}[/green]")
+        except Exception as e:
+            # L4 FIX: Log CSV flattening failures
+            logger.warning(f"⚠️ CSV flattening failed for key '{best_key}': {e}")
+            console.print(f"   [yellow]⚠️ CSV export failed - data too complex. JSON is complete.[/yellow]")
 
 async def main_async(config: ScraperConfig):
     """Async entry point to run scraper and UI concurrently."""
@@ -221,10 +238,10 @@ def scrape(config_path: str):
         if temp_file.exists(): 
             temp_file.unlink()
         
-        console.print(f"[bold green]Scrape Completed Successfully![/bold green]")
+        console.print(f"[bold green]✅ Scrape Completed Successfully![/bold green]")
             
     except KeyboardInterrupt:
-        console.print("[bold yellow]Scrape interrupted. Partial data saved in data/temp_stream.jsonl[/bold yellow]")
+        console.print("[bold yellow]⚠️ Scrape interrupted. Partial data saved in data/temp_stream.jsonl[/bold yellow]")
     except Exception as e:
         logger.exception(f"Fatal Error: {e}")
         console.print(f"[bold red]Fatal Error:[/bold red] Check logs for details.")

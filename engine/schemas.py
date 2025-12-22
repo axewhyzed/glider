@@ -3,15 +3,11 @@ from enum import Enum
 from pydantic import BaseModel, HttpUrl, Field, field_validator
 from dataclasses import dataclass
 
-# --- Shared Event Types ---
 @dataclass
 class StatsEvent:
-    """Type-safe event for stats updates."""
     event_type: Literal["page_success", "page_error", "page_skipped", "blocked", "entries_added"]
     count: int = 1
     metadata: Optional[Dict[str, Any]] = None
-
-# --- Existing Enums & Models ---
 
 class SelectorType(str, Enum):
     CSS = "css"
@@ -46,74 +42,55 @@ class Selector(BaseModel):
     value: str
 
 class Interaction(BaseModel):
-    """Defines an action to perform on the page before extraction."""
     type: InteractionType
     selector: Optional[str] = None
-    value: Optional[str] = None  # Text to fill or key to press
-    duration: Optional[int] = None # Duration for wait (ms)
+    value: Optional[str] = None
+    duration: Optional[int] = None
 
 class DataField(BaseModel):
     name: str
     selectors: List[Selector]
     is_list: bool = False
-    attribute: Optional[str] = Field(default=None, description="HTML attribute to extract (e.g., 'href', 'src', 'data-id'). If None, extracts text content.")
+    attribute: Optional[str] = None
     transformers: List[Transformer] = []
     children: Optional[List['DataField']] = None
     
     @field_validator('attribute')
     @classmethod
     def validate_attribute(cls, v):
-        if v is not None:
-            v = v.strip().lower()
-            if not v:
-                return None
-        return v
+        return v.strip().lower() if v and v.strip() else None
 
 class Pagination(BaseModel):
     selector: Selector
     max_pages: int = 5
-    
     @field_validator('max_pages')
     @classmethod
     def check_max_pages(cls, v):
-        if v < 1:
-            raise ValueError('max_pages must be at least 1')
+        if v < 1: raise ValueError('max_pages must be at least 1')
         return v
 
 class ScraperConfig(BaseModel):
     name: str
-    base_url: Optional[HttpUrl] = None # Optional for list mode
+    base_url: Optional[HttpUrl] = None
     mode: ScrapeMode = ScrapeMode.PAGINATION
-    
     start_urls: Optional[List[HttpUrl]] = []
-
     use_playwright: bool = False
     wait_for_selector: Optional[str] = None
-    
-    # Browser Interactions
-    interactions: Optional[List[Interaction]] = Field(default=[], description="Actions to perform before scraping")
-    
-    # Anti-Ban & Performance
+    interactions: Optional[List[Interaction]] = []
     min_delay: int = 1
     max_delay: int = 3
-    
-    proxies: Optional[List[str]] = Field(default=None, description="List of proxy URLs to rotate")
-    
+    proxies: Optional[List[str]] = None
     concurrency: int = 2
     rate_limit: int = 5
-    
-    # Ethical & Reliability
     respect_robots_txt: bool = False
     use_checkpointing: bool = False
-
     fields: List[DataField]
     pagination: Optional[Pagination] = None
     
     @field_validator('concurrency', 'rate_limit')
     @classmethod
     def check_positive(cls, v):
-        if v < 1:
-            raise ValueError('Must be positive integer')
+        if v < 1: raise ValueError('Must be positive integer')
         return v
 
 DataField.model_rebuild()

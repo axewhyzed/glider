@@ -2,13 +2,12 @@ import sys
 import os
 import typer
 import json
-import csv
 import asyncio
 import aiofiles
 from datetime import datetime
 from pathlib import Path
 from loguru import logger
-from typing import Dict, Any, Optional
+from typing import Optional
 
 from rich.live import Live
 from rich.table import Table
@@ -16,7 +15,7 @@ from rich.console import Console
 
 from engine.schemas import ScraperConfig, StatsEvent
 from engine.scraper import ScraperEngine
-from engine.utils import flatten_dict
+from engine.export import convert_to_json, convert_to_csv
 
 app = typer.Typer()
 console = Console()
@@ -81,75 +80,21 @@ def setup_logging():
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {module} - {message}"
     )
 
-def process_temp_file(temp_file: Path, config_name: str):
-    """
-    Post-process the stream file to create valid JSON and CSV.
-    Uses memory-efficient line-by-line processing.
-    """
-    if not temp_file.exists():
-        console.print("[yellow]⚠️ No data found to export.[/yellow]")
-        return
-
-    output_dir = Path("data")
-    output_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_filename = f"{config_name.replace(' ', '_').lower()}_{timestamp}"
-    
-    json_path = output_dir / f"{base_filename}.json"
-    csv_path = output_dir / f"{base_filename}.csv"
-
-    console.print("[cyan]📦 Finalizing data export...[/cyan]")
-    
-    final_data = {}
-    
-    try:
-        with open(temp_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                chunk = json.loads(line)
-                for k, v in chunk.items():
-                    if k not in final_data: final_data[k] = []
-                    if isinstance(v, list): final_data[k].extend(v)
-                    else: final_data[k].append(v)
-        
-        # Save JSON
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(final_data, f, indent=2, ensure_ascii=False)
-        console.print(f"   [green]✅ JSON saved to {json_path}[/green]")
-
-        # 2. CSV Export
-        best_key = None
-        max_len = 0
-        for k, v in final_data.items():
-            if isinstance(v, list) and len(v) > max_len and len(v) > 0 and isinstance(v[0], dict):
-                max_len = len(v)
-                best_key = k
-        
-        if best_key:
-            flat_items = [flatten_dict(item) for item in final_data[best_key]]
-            all_keys = set().union(*(d.keys() for d in flat_items))
-            fieldnames = sorted(list(all_keys))
-            
-            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(flat_items)
-            console.print(f"   [green]✅ CSV saved to {csv_path}[/green]")
-            
-    except Exception as e:
-        logger.error(f"Export failed: {e}")
-        console.print(f"[red]❌ Export failed: {e}[/red]")
-
 async def main_async(config: ScraperConfig):
     stats = ScrapeStats()
     temp_file = Path("data") / "temp_stream.jsonl"
     temp_file.parent.mkdir(exist_ok=True)
-    if temp_file.exists(): temp_file.unlink()
+    
+    # Ensure fresh start for temp file if needed, 
+    # though appending allows resume if logic supports it. 
+    # Here we clear for safety unless resume logic is strictly defined.
+    if temp_file.exists(): 
+        temp_file.unlink()
 
     async def incremental_writer(data_chunk: dict):
         async with aiofiles.open(temp_file, mode='a', encoding='utf-8') as f:
             await f.write(json.dumps(data_chunk, ensure_ascii=False) + "\n")
             await f.flush()
-            os.fsync(f.fileno())
 
     engine = ScraperEngine(
         config, 
@@ -188,12 +133,27 @@ def scrape(config_path: str):
 
     try:
         temp_file = asyncio.run(main_async(config))
-        process_temp_file(temp_file, config.name)
-        if temp_file.exists(): temp_file.unlink()
-        console.print("[green]✨ Done![/green]")
+        
+        # Post-process using streaming export (Fixed Memory Issue)
+        if temp_file.exists() and temp_file.stat().st_size > 0:
+            console.print("[cyan]📦 Finalizing data export...[/cyan]")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_filename = f"{config.name.replace(' ', '_').lower()}_{timestamp}"
+            
+            output_dir = Path("data")
+            convert_to_json(temp_file, output_dir / f"{base_filename}.json")
+            convert_to_csv(temp_file, output_dir / f"{base_filename}.csv")
+            
+            temp_file.unlink() # Cleanup
+            console.print("[green]✨ Done![/green]")
+        else:
+            console.print("[yellow]⚠️ No data was extracted.[/yellow]")
+
     except KeyboardInterrupt:
-        console.print("[yellow]⚠️ Interrupted. Data saved.[/yellow]")
-        process_temp_file(Path("data") / "temp_stream.jsonl", config.name)
+        console.print("[yellow]⚠️ Interrupted. Attempting to save captured data...[/yellow]")
+        temp_file = Path("data") / "temp_stream.jsonl"
+        if temp_file.exists():
+             convert_to_json(temp_file, Path("data") / "interrupted_data.json")
     except Exception as e:
         logger.exception(f"Fatal: {e}")
         console.print("[red]Fatal Error. Check logs.[/red]")

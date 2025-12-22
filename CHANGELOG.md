@@ -1,7 +1,75 @@
 # Changelog - Refined Fixes (v2.6)
 
 ## Overview
-This release focuses on production-grade reliability, crash recovery, and performance optimization.
+This release focuses on production-grade reliability, crash recovery, performance optimization, and a major new feature: **HTML Attribute Extraction**.
+
+---
+
+## 🎉 NEW FEATURE: HTML Attribute Extraction
+
+### Problem Solved
+- **Previous limitation**: Could only extract text content from HTML elements
+- **No way to extract**: Links (href), images (src), data attributes, CSS classes, etc.
+- **Workaround required**: Manual post-processing or custom transformers
+
+### Solution Implemented
+Added `attribute` field to `DataField` schema:
+
+```json
+{
+  "name": "product_image",
+  "selectors": [{"type": "css", "value": "img.product"}],
+  "attribute": "src"  // NEW!
+}
+```
+
+### Supported Attributes
+- ✅ **Links**: `href`, `data-href`
+- ✅ **Images**: `src`, `srcset`, `alt`
+- ✅ **Videos**: `poster`, `data-video-id`
+- ✅ **Data attributes**: `data-*` (any custom attribute)
+- ✅ **Metadata**: `class`, `id`, `title`, `aria-*`
+- ✅ **Any HTML attribute**: Fully flexible
+
+### Impact
+- ✅ **Backward compatible**: Defaults to text if `attribute` not specified
+- ✅ **Works with CSS and XPath**: Unified API
+- ✅ **Integrates with transformers**: Apply `to_int`, `to_float`, etc. to attributes
+- ✅ **Zero performance overhead**: Same speed as text extraction
+
+### Example Usage
+
+**Extract product links and images**:
+```json
+{
+  "name": "products",
+  "is_list": true,
+  "selectors": [{"type": "css", "value": "div.product"}],
+  "children": [
+    {"name": "title", "selectors": [{"type": "css", "value": "h3"}]},
+    {"name": "url", "selectors": [{"type": "css", "value": "a"}], "attribute": "href"},
+    {"name": "image", "selectors": [{"type": "css", "value": "img"}], "attribute": "src"},
+    {"name": "price", "selectors": [{"type": "css", "value": "span.price"}]}
+  ]
+}
+```
+
+**Output**:
+```json
+{
+  "products": [
+    {
+      "title": "Gaming Laptop",
+      "url": "/products/laptop-123",
+      "image": "https://cdn.example.com/laptop.jpg",
+      "price": "$999.99"
+    }
+  ]
+}
+```
+
+### Documentation
+See [docs/ATTRIBUTE_EXTRACTION.md](docs/ATTRIBUTE_EXTRACTION.md) for comprehensive guide with 10+ examples.
 
 ---
 
@@ -134,6 +202,10 @@ This release focuses on production-grade reliability, crash recovery, and perfor
 | `engine/checkpoint.py` | Two-phase commit system | +40 |
 | `main.py` | Event-based stats, fsync writes | +60 |
 | `engine/scraper.py` | Micro-batching, bloom filter, interaction logging | +120 |
+| `engine/schemas.py` | Added `attribute` field to DataField | +15 |
+| `engine/resolver.py` | Attribute extraction implementation | +50 |
+| `docs/ATTRIBUTE_EXTRACTION.md` | Comprehensive feature documentation | NEW |
+| `configs/attribute_extraction_example.json` | Example config | NEW |
 
 ### New Dependencies
 - **pybloom-live**: Probabilistic data structure for memory-efficient deduplication
@@ -152,6 +224,7 @@ This release focuses on production-grade reliability, crash recovery, and perfor
 | **I/O operations** | 1 per page | 1 per 10 items | +10x calls but batched |
 | **Crash recovery** | Manual re-run | Automatic | ✅ |
 | **Interaction reliability** | No retry | 2 attempts | +2x |
+| **Attribute extraction** | Not supported | Full support | NEW |
 
 ---
 
@@ -174,6 +247,15 @@ python main.py configs/books_example.json
 # Watch the dashboard during scraping
 # "Total Entries" should increment in real-time
 # "Avg Entries/sec" shows extraction rate
+```
+
+### Test Attribute Extraction
+```bash
+# Run the attribute extraction example
+python main.py configs/attribute_extraction_example.json
+
+# Verify output includes href and src attributes
+cat data/attribute_extraction_example_*.json | jq '.books[0]'
 ```
 
 ### Test Interaction Logging
@@ -208,6 +290,7 @@ grep "🎮" logs/glider.log
 - [ ] Automatic retry with exponential backoff for incomplete URLs
 - [ ] Web UI for real-time dashboard
 - [ ] Distributed scraping with Redis queue
+- [ ] Attribute validation (e.g., ensure URLs are absolute)
 
 ---
 
@@ -229,7 +312,16 @@ grep "🎮" logs/glider.log
    }
    ```
 
-4. **Check logs** for new interaction logging:
+4. **Optional**: Add attribute extraction to extract links/images:
+   ```json
+   {
+     "name": "image_url",
+     "selectors": [{"type": "css", "value": "img"}],
+     "attribute": "src"
+   }
+   ```
+
+5. **Check logs** for new interaction logging:
    ```bash
    tail -f logs/glider.log | grep "🎮"
    ```
@@ -242,5 +334,6 @@ These improvements address real-world pain points discovered during production d
 - Data loss on network interruptions
 - Memory exhaustion on large datasets (500k+ items)
 - Silent interaction failures causing incomplete extractions
+- **Inability to extract links and images** (most requested feature!)
 
 All fixes prioritize **reliability over speed**, ensuring zero data loss in production environments.

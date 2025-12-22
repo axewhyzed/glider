@@ -1,108 +1,36 @@
 {
-  "name": "Books_To_Scrape_Practice",
+  "name": "books_scraper",
+  "base_url": "http://books.toscrape.com",
   "mode": "pagination",
-  "base_url": "https://books.toscrape.com/catalogue/page-1.html",
-  "use_playwright": false,
-  "respect_robots_txt": true,
-  "use_checkpointing": true,
-  "concurrency": 5,
   "rate_limit": 10,
-  "min_delay": 1,
-  "max_delay": 2,
-  "pagination": {
-    "selector": {
-      "type": "css",
-      "value": "li.next a"
-    },
-    "max_pages": 50
-  },
+  "concurrency": 4,
+  "use_checkpointing": true,
   "fields": [
     {
       "name": "books",
+      "selector": "article.product_pod",
       "is_list": true,
-      "selectors": [
-        {
-          "type": "css",
-          "value": "article.product_pod"
-        }
-      ],
       "children": [
         {
           "name": "title",
-          "selectors": [
-            {
-              "type": "css",
-              "value": "h3 a"
-            }
-          ],
-          "transformers": [
-            {
-              "name": "strip",
-              "args": []
-            }
-          ]
+          "selector": "h3 a",
+          "attribute": "title"
         },
         {
           "name": "price",
-          "selectors": [
-            {
-              "type": "css",
-              "value": "p.price_color"
-            }
-          ],
-          "transformers": [
-            {
-              "name": "strip",
-              "args": []
-            }
-          ]
+          "selector": "p.price_color",
+          "transformers": ["strip", "to_float"]
         },
         {
           "name": "availability",
-          "selectors": [
-            {
-              "type": "css",
-              "value": "p.availability"
-            }
-          ],
-          "transformers": [
-            {
-              "name": "strip",
-              "args": []
-            }
-          ]
-        },
-        {
-          "name": "rating",
-          "selectors": [
-            {
-              "type": "xpath",
-              "value": ".//p[contains(@class, 'star-rating')]/@class"
-            }
-          ],
-          "transformers": [
-            {
-              "name": "strip",
-              "args": []
-            }
-          ]
-        },
-        {
-          "name": "image_url",
-          "selectors": [
-            {
-              "type": "xpath",
-              "value": ".//img/@src"
-            }
-          ],
-          "transformers": [
-            {
-              "name": "strip",
-              "args": []
-            }
-          ]
+          "selector": "p.instock.availability",
+          "transformers": ["strip"]
         }
       ]
     }
-  ]
+  ],
+  "pagination": {
+    "selector": "li.next a",
+    "max_pages": 3
+  }
 }

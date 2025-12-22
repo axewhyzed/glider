@@ -1,80 +1,50 @@
 {
-  "name": "Disboard_Production_Scrape",
-  "mode": "list",
-  "start_urls": ["https://disboard.org/servers"],
-  "use_playwright": true,
-  "respect_robots_txt": true,
-  "use_checkpointing": true,
-  "concurrency": 1,
-  "rate_limit": 1,
-  "min_delay": 20,
-  "max_delay": 35,
-  "wait_for_selector": "div.listing-card",
-  "interactions": [
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
-    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
-    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 }
-  ],
-  "fields": [
-    {
-      "name": "servers",
-      "is_list": true,
-      "selectors": [{"type": "css", "value": "div.listing-card"}],
-      "children": [
+    "name": "discord_servers",
+    "base_url": "https://disboard.org/servers/tag/anime",
+    "mode": "pagination",
+    "use_playwright": true,
+    "wait_for_selector": "div.listing-card",
+    "interactions": [
         {
-          "name": "server_name",
-          "selectors": [{"type": "css", "value": ".server-name a"}],
-          "transformers": [{"name": "strip"}]
+            "type": "wait",
+            "duration": 10000
         },
         {
-          "name": "server_id",
-          "selectors": [{"type": "css", "value": "a.button-mute-server"}],
-          "attribute": "data-server-id"
-        },
-        {
-          "name": "online_count",
-          "selectors": [{"type": "css", "value": ".server-online"}],
-          "transformers": [{"name": "to_int"}]
-        },
-        {
-          "name": "bumped_at_utc",
-          "selectors": [{"type": "css", "value": ".server-bumped-at"}],
-          "attribute": "title"
-        },
-        {
-          "name": "description",
-          "selectors": [{"type": "css", "value": ".elastic-text-inner"}],
-          "transformers": [{"name": "strip"}]
-        },
-        {
-          "name": "tags",
-          "is_list": true,
-          "selectors": [{"type": "css", "value": ".server-tags span.name"}],
-          "transformers": [{"name": "strip"}]
-        },
-        {
-          "name": "icon_url",
-          "selectors": [{"type": "css", "value": ".server-icon img"}],
-          "attribute": "data-src"
+            "type": "scroll"
         }
-      ]
+    ],
+    "fields": [
+        {
+            "name": "server_list",
+            "selector": "div.listing-card",
+            "is_list": true,
+            "children": [
+                {
+                    "name": "title",
+                    "selector": "div.server-name a",
+                    "transformers": ["strip"]
+                },
+                {
+                    "name": "description",
+                    "selector": "div.server-description",
+                    "transformers": ["strip"]
+                },
+                {
+                    "name": "online_count",
+                    "selector": "span.server-online",
+                    "transformers": ["strip", "to_int"]
+                },
+                {
+                    "name": "tags",
+                    "selector": "ul.tags a.tag .name",
+                    "is_list": true,
+                    "transformers": ["strip"]
+                }
+            ]
+        }
+    ],
+    "pagination": {
+        "selector": "a.pagination-next",
+        "max_pages": 2
     }
-  ]
 }

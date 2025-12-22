@@ -1,0 +1,80 @@
+{
+  "name": "Disboard_Production_Scrape",
+  "mode": "list",
+  "start_urls": ["https://disboard.org/servers"],
+  "use_playwright": true,
+  "respect_robots_txt": true,
+  "use_checkpointing": true,
+  "concurrency": 1,
+  "rate_limit": 1,
+  "min_delay": 20,
+  "max_delay": 35,
+  "wait_for_selector": "div.listing-card",
+  "interactions": [
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 },
+    { "type": "scroll" }, { "type": "wait", "duration": 3000 },
+    { "type": "click", "selector": "#load-more" }, { "type": "wait", "duration": 8000 }
+  ],
+  "fields": [
+    {
+      "name": "servers",
+      "is_list": true,
+      "selectors": [{"type": "css", "value": "div.listing-card"}],
+      "children": [
+        {
+          "name": "server_name",
+          "selectors": [{"type": "css", "value": ".server-name a"}],
+          "transformers": [{"name": "strip"}]
+        },
+        {
+          "name": "server_id",
+          "selectors": [{"type": "css", "value": "a.button-mute-server"}],
+          "attribute": "data-server-id"
+        },
+        {
+          "name": "online_count",
+          "selectors": [{"type": "css", "value": ".server-online"}],
+          "transformers": [{"name": "to_int"}]
+        },
+        {
+          "name": "bumped_at_utc",
+          "selectors": [{"type": "css", "value": ".server-bumped-at"}],
+          "attribute": "title"
+        },
+        {
+          "name": "description",
+          "selectors": [{"type": "css", "value": ".elastic-text-inner"}],
+          "transformers": [{"name": "strip"}]
+        },
+        {
+          "name": "tags",
+          "is_list": true,
+          "selectors": [{"type": "css", "value": ".server-tags span.name"}],
+          "transformers": [{"name": "strip"}]
+        },
+        {
+          "name": "icon_url",
+          "selectors": [{"type": "css", "value": ".server-icon img"}],
+          "attribute": "data-src"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,17 @@
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict, Literal
 from enum import Enum
 from pydantic import BaseModel, HttpUrl, Field, field_validator
+from dataclasses import dataclass
+
+# --- Shared Event Types ---
+@dataclass
+class StatsEvent:
+    """Type-safe event for stats updates."""
+    event_type: Literal["page_success", "page_error", "page_skipped", "blocked", "entries_added"]
+    count: int = 1
+    metadata: Optional[Dict[str, Any]] = None
+
+# --- Existing Enums & Models ---
 
 class SelectorType(str, Enum):
     CSS = "css"
@@ -42,22 +53,6 @@ class Interaction(BaseModel):
     duration: Optional[int] = None # Duration for wait (ms)
 
 class DataField(BaseModel):
-    """
-    Defines a field to extract from HTML.
-    
-    Examples:
-        # Extract text content:
-        {"name": "title", "selectors": [{"type": "css", "value": "h1"}]}
-        
-        # Extract href attribute:
-        {"name": "link", "selectors": [{"type": "css", "value": "a"}], "attribute": "href"}
-        
-        # Extract image src:
-        {"name": "image_url", "selectors": [{"type": "css", "value": "img.product"}], "attribute": "src"}
-        
-        # Extract data attribute:
-        {"name": "product_id", "selectors": [{"type": "css", "value": "div.item"}], "attribute": "data-id"}
-    """
     name: str
     selectors: List[Selector]
     is_list: bool = False
@@ -68,12 +63,10 @@ class DataField(BaseModel):
     @field_validator('attribute')
     @classmethod
     def validate_attribute(cls, v):
-        """Ensure attribute names are valid if provided."""
         if v is not None:
-            # Strip whitespace and convert to lowercase for consistency
             v = v.strip().lower()
             if not v:
-                return None  # Empty string treated as None
+                return None
         return v
 
 class Pagination(BaseModel):

@@ -99,7 +99,7 @@ class ScraperEngine:
 
     def _init_session(self):
         browser_choice = random.choice(["chrome110", "chrome120", "chrome100", "safari17_0"])
-        cookies = None
+        cookies = {} 
         
         # [FIXED] Cookie Validation
         if self.config.cookies_file:
@@ -107,14 +107,15 @@ class ScraperEngine:
                 with open(self.config.cookies_file, 'r') as f:
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
-                        cookies = {}
+                        # Strict Type Checking & None Skipping
                         for k, v in loaded.items():
                             if v is None:
-                                continue  # Skip None values
+                                continue
                             if isinstance(v, (str, int, float, bool)):
                                 cookies[str(k)] = str(v)
                             else:
                                 logger.warning(f"Skipping invalid cookie {k}: {type(v)}")
+                        
                         logger.info(f"🍪 Loaded {len(cookies)} cookies")
                     else:
                         logger.error("❌ Invalid cookie format: Root must be a dictionary")
@@ -123,7 +124,7 @@ class ScraperEngine:
 
         self.session = AsyncSession(
             impersonate=cast(Any, browser_choice),
-            cookies=cookies
+            cookies=cookies if cookies else None
         )
 
     async def _cleanup_resources(self):
@@ -145,6 +146,7 @@ class ScraperEngine:
             self.robots_parser.set_url(url)
             await asyncio.get_running_loop().run_in_executor(None, self.robots_parser.read)
         except Exception as e:
+            # [FIXED] Proper Logging
             logger.warning(f"Failed to fetch robots.txt: {e}. Proceeding without restrictions.")
             self.robots_parser = None
 
@@ -179,7 +181,7 @@ class ScraperEngine:
                 logger.exception(f"Worker crashed on URL: {e}")
                 self.shutdown_requested = True  # Signal shutdown
                 raise  # Or re-raise after cleanup
-
+            
     async def _process_url(self, url: str):
         if not self._is_allowed(url):
             if self.stats_callback: self.stats_callback(StatsEvent("blocked"))
@@ -337,12 +339,16 @@ class ScraperEngine:
         self.seen_hashes.add(data_hash)
         self.recent_hashes.append(data_hash)
 
+        # [FIXED] Initialize variable outside lock (Issue #17)
+        batch_to_flush = []
+
         async with self.data_lock:
             self.pending_batch.append(page_data)
             if len(self.pending_batch) >= self.batch_size:
                 batch_to_flush = self.pending_batch.copy()
                 self.pending_batch = []
         
+        # Safe to check now
         if batch_to_flush:
             await self._flush_batch(batch_to_flush)
             if self.stats_callback:

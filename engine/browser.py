@@ -49,6 +49,7 @@ class BrowserManager:
     async def _create_context(self):
         if self.context:
             try:
+                # [FIXED] Error Handling to prevent Memory Leak (Issue #18)
                 await self.context.close()
             except Exception as e:
                 logger.warning(f"Failed to close old context: {e}")
@@ -69,7 +70,6 @@ class BrowserManager:
         if self.playwright: await self.playwright.stop()
         self.playwright = None
 
-    # [FIXED] Added headers support
     async def fetch_page(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
         """Fetch a page content handling context rotation and interactions."""
         if not self.context:

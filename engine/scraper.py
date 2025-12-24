@@ -56,6 +56,7 @@ class ScraperEngine:
         # Authentication State
         self.auth_token: Optional[str] = None
         self.token_expires_at: datetime = datetime.min
+        self._auth_lock = asyncio.Lock() # [FIXED] Auth Lock
 
     async def run(self):
         logger.info(f"🚀 Starting Engine for: {self.config.name}")
@@ -93,7 +94,6 @@ class ScraperEngine:
 
     def _init_session(self):
         browser_choice = random.choice(["chrome110", "chrome120", "chrome100", "safari17_0"])
-        # Load cookies if file exists
         cookies = None
         if self.config.cookies_file:
             try:
@@ -165,7 +165,6 @@ class ScraperEngine:
             try:
                 content = await self._fetch_page(url)
                 if content:
-                    # UPDATED: Capture return data and flush here
                     data, _ = await self._process_content(content, url)
                     await self._merge_data(data)
                     await self.checkpoint.mark_done(url)
@@ -174,6 +173,11 @@ class ScraperEngine:
                     raise Exception("Empty Content")
             except Exception as e:
                 logger.error(f"Failed {url}: {e}")
+                
+                # [FIXED] Snapshot on Failure
+                if 'content' in locals() and content:
+                    await self._save_debug_snapshot(content, url)
+                
                 self.failed_urls.append(url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
 
@@ -190,10 +194,12 @@ class ScraperEngine:
             await self.checkpoint.mark_in_progress(current_url)
             
             try:
-                content = await self._fetch_page(current_url)
+                # [FIXED] Apply Rate Limiter to Pagination
+                async with self.rate_limiter:
+                    content = await self._fetch_page(current_url)
+                
                 if not content: raise Exception("Empty")
                 
-                # UPDATED: Capture data and flush
                 data, resolver = await self._process_content(content, current_url)
                 await self._merge_data(data)
                 
@@ -212,72 +218,72 @@ class ScraperEngine:
                     current_url = None
             except Exception as e:
                 logger.error(f"Page failed: {e}")
+                # [FIXED] Snapshot on Pagination Failure
+                if 'content' in locals() and content:
+                    await self._save_debug_snapshot(content, current_url)
                 break
 
-    # [UPDATED] Recursive Content Processing with Data Linking
     async def _process_content(self, content: str, url: str = "", fields: Optional[List[DataField]] = None) -> Tuple[Dict[str, Any], Any]:
         current_fields = fields or self.config.fields
         
-        # 1. Resolver Logic (Fixed JSON vs Playwright issue)
         if self.config.response_type == "json":
              resolver = JsonResolver(content)
         else:
              resolver = HtmlResolver(content)
 
-        # 2. Extract Data
         data = {}
         for field in current_fields:
-            # A. Standard Extraction
             extracted_value = resolver.resolve_field(field)
             
-            # B. Link Following (Deep Scrape)
             if field.follow_url and extracted_value and field.nested_fields:
                 urls_to_follow = extracted_value if isinstance(extracted_value, list) else [extracted_value]
                 nested_results_list = []
                 
-                # Limit children to prevent explosion
-                urls_to_follow = urls_to_follow[:5]
+                # [FIXED] Configurable Limit
+                max_urls = self.config.max_nested_urls
+                urls_to_follow = urls_to_follow[:max_urls]
+                
                 if urls_to_follow:
                     logger.info(f"    ↳ Following {len(urls_to_follow)} nested links from {url}...")
                 
                 for relative_url in urls_to_follow:
                     full_child_url = urljoin(url, str(relative_url))
                     
-                    # Reddit Specific Hack
                     if self.config.response_type == "json" and not full_child_url.endswith(".json"):
                         parsed = urlparse(full_child_url)
                         path = parsed.path.rstrip('/')
                         full_child_url = f"{parsed.scheme}://{parsed.netloc}{path}.json"
 
-                    # [FIXED] Stability Checks before recursion
                     if not self._is_allowed(full_child_url): continue
                     if self.checkpoint.is_done(full_child_url): continue
                     
                     try:
-                        # Rate Limit applies to child requests
+                        # [FIXED] Mark In-Progress BEFORE Fetch
+                        await self.checkpoint.mark_in_progress(full_child_url)
+                        
                         async with self.rate_limiter:
                             child_content = await self._fetch_page(full_child_url)
-                            if child_content:
-                                await self.checkpoint.mark_in_progress(full_child_url)
-                                
-                                # RECURSION: Get child data
-                                child_data, _ = await self._process_content(
-                                    child_content, 
-                                    full_child_url, 
-                                    fields=field.nested_fields
-                                )
-                                
-                                # [FIXED] Data Linking: Inject Parent URL
-                                child_data["_source_url"] = full_child_url
-                                child_data["_parent_url"] = url
-                                
-                                nested_results_list.append(child_data)
-                                await self.checkpoint.mark_done(full_child_url)
+                            
+                        if child_content:
+                            child_data, _ = await self._process_content(
+                                child_content, 
+                                full_child_url, 
+                                fields=field.nested_fields
+                            )
+                            
+                            child_data["_source_url"] = full_child_url
+                            child_data["_parent_url"] = url
+                            
+                            nested_results_list.append(child_data)
+                            await self.checkpoint.mark_done(full_child_url)
+                            
+                            if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
+                        else:
+                            pass
                                 
                     except Exception as e:
                         logger.warning(f"Failed to follow {full_child_url}: {e}")
 
-                # Nest the results
                 data[field.name] = nested_results_list
             else:
                 data[field.name] = extracted_value
@@ -298,23 +304,21 @@ class ScraperEngine:
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
 
-    def _cpu_bound_extract(self, html: str):
-        resolver = HtmlResolver(html)
-        data = {}
-        for field in self.config.fields:
-            data[field.name] = resolver.resolve_field(field)
-        return data, resolver
+    # [FIXED] Removed Dead Code `_cpu_bound_extract`
 
     async def _merge_data(self, page_data: Dict[str, Any]):
-        batch_to_flush = None
-        entries = 0
-        
-        # Flattening logic: If we have a list of nested items, we might want to explode them
-        # or keep them as a single JSON object.
-        # For this version, we append the entire page_data object as one record.
-        # If specific fields (like 'posts') are lists, they remain lists.
-        
         if not any(page_data.values()): return
+
+        # [FIXED] Restored Deduplication Logic
+        data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True).encode()).hexdigest()
+        
+        if data_hash in self.seen_hashes:
+            if data_hash in self.recent_hashes:
+                logger.debug(f"Skipped duplicate entry: {data_hash[:8]}")
+                return
+
+        self.seen_hashes.add(data_hash)
+        self.recent_hashes.append(data_hash)
 
         async with self.data_lock:
             self.pending_batch.append(page_data)
@@ -329,7 +333,6 @@ class ScraperEngine:
 
     async def _flush_batch(self, batch: List[Dict]):
         if self.output_callback and batch:
-            # We output a JSON lines equivalent (list of objects)
             await self.output_callback({"items": batch}) 
 
     async def _flush_remaining_batches(self):
@@ -338,7 +341,6 @@ class ScraperEngine:
             self.pending_batch = []
         if batch: await self._flush_batch(batch)
 
-    # --- UPDATED AUTH LOGIC ---
     async def ensure_active_token(self):
         if not self.config.authentication:
             return
@@ -346,59 +348,58 @@ class ScraperEngine:
         if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
             return
 
-        logger.info(f"🔄 Refreshing OAuth Token for {self.config.authentication.type}...")
-        auth_config = self.config.authentication
-        
-        if not self.session:
-            self._init_session()
-        
-        if not self.session:
-            raise RuntimeError("Failed to initialize session")
+        # [FIXED] Thread-safe Auth Refresh
+        async with self._auth_lock:
+            if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
+                return
 
-        try:
-            if auth_config.type == "oauth_password":
-                client_id = auth_config.client_id or ""
-                client_secret = auth_config.client_secret or ""
-                
-                payload = {
-                    "grant_type": "password",
-                    "username": auth_config.username or "",
-                    "password": auth_config.password or "",
-                    "scope": auth_config.scope or "*"
-                }
+            logger.info(f"🔄 Refreshing OAuth Token for {self.config.authentication.type}...")
+            auth_config = self.config.authentication
+            
+            if not self.session: self._init_session()
+            if not self.session: raise RuntimeError("Failed to initialize session")
 
-                # [FIXED] IP Leak: Use Proxy for Auth
-                current_proxy = self._get_next_proxy()
-                proxies = {"http": current_proxy, "https": current_proxy} if current_proxy else None
-
-                response = await self.session.post(
-                    str(auth_config.token_url),
-                    auth=(client_id, client_secret),
-                    data=payload,
-                    proxies=cast(Any, proxies) # <--- Fixed with cast(Any, ...)
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    self.auth_token = data.get("access_token")
-                    expires_in = data.get("expires_in", 3600)
-                    self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
-                    logger.success(f"✅ Token Refreshed! Expires in {expires_in}s")
-                else:
-                    logger.error(f"❌ Auth Failed: {response.status_code} - {response.text}")
-                    raise Exception("Authentication Failed")
+            try:
+                if auth_config.type == "oauth_password":
+                    client_id = auth_config.client_id or ""
+                    client_secret = auth_config.client_secret or ""
                     
-        except Exception as e:
-            logger.error(f"Auth Error: {e}")
-            raise e
+                    payload = {
+                        "grant_type": "password",
+                        "username": auth_config.username or "",
+                        "password": auth_config.password or "",
+                        "scope": auth_config.scope or "*"
+                    }
+
+                    current_proxy = self._get_next_proxy()
+                    proxies = {"http": current_proxy, "https": current_proxy} if current_proxy else None
+
+                    response = await self.session.post(
+                        str(auth_config.token_url),
+                        auth=(client_id, client_secret),
+                        data=payload,
+                        proxies=cast(Any, proxies)
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        self.auth_token = data.get("access_token")
+                        expires_in = data.get("expires_in", 3600)
+                        self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+                        logger.success(f"✅ Token Refreshed! Expires in {expires_in}s")
+                    else:
+                        logger.error(f"❌ Auth Failed: {response.status_code} - {response.text}")
+                        raise Exception("Authentication Failed")
+                        
+            except Exception as e:
+                logger.error(f"Auth Error: {e}")
+                raise e
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
-        # 1. Handle Auto-Refresh
         if self.config.authentication:
             await self.ensure_active_token()
 
-        # 2. Build Headers
         headers = self.config.headers.copy() if self.config.headers else {}
         headers["User-Agent"] = self.ua_rotator.random
         
@@ -408,7 +409,7 @@ class ScraperEngine:
         current_proxy = self._get_next_proxy()
         
         if self.browser_manager:
-            return await self.browser_manager.fetch_page(url)
+            return await self.browser_manager.fetch_page(url, headers=headers)
         else:
             if not self.session: return ""
             try:

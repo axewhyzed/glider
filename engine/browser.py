@@ -36,7 +36,7 @@ class BrowserManager:
         
         self.playwright = await async_playwright().start()
         
-        # Fix: Explicitly type as Dict[str, Any] to satisfy Pylance
+        # Explicitly type as Dict[str, Any] to satisfy Pylance
         launch_args: Dict[str, Any] = {"headless": True}
         
         if proxy:
@@ -66,7 +66,8 @@ class BrowserManager:
         if self.playwright: await self.playwright.stop()
         self.playwright = None
 
-    async def fetch_page(self, url: str) -> str:
+    # [FIXED] Added headers support (Issue #7)
+    async def fetch_page(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
         """Fetch a page content handling context rotation and interactions."""
         if not self.context:
             raise RuntimeError("Browser context not started")
@@ -79,6 +80,10 @@ class BrowserManager:
 
         page = await self.context.new_page()
         try:
+            # 1. Apply Headers (for Auth/Cookies)
+            if headers:
+                await page.set_extra_http_headers(headers)
+
             if stealth_async:
                 await stealth_async(page)
             

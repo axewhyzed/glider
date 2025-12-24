@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any
+from loguru import logger  # <--- Added logger
 
 class BloomFilter:
     """
@@ -66,18 +67,26 @@ class BloomFilter:
     
     def save(self, path: Path):
         """Persist bit array to disk."""
-        with open(path, 'wb') as f:
-            f.write(self.bit_array)
+        try:
+            with open(path, 'wb') as f:
+                f.write(self.bit_array)
+        except Exception as e:
+            logger.warning(f"Failed to save bloom filter: {e}")
             
     def load(self, path: Path):
         """Load bit array from disk if size matches."""
         if not path.exists():
             return
         
-        file_size = os.path.getsize(path)
-        if file_size != len(self.bit_array):
-            # If config changed (capacity/error_rate), invalidates cache
-            return
-            
-        with open(path, 'rb') as f:
-            self.bit_array = bytearray(f.read())
+        try:
+            file_size = os.path.getsize(path)
+            if file_size != len(self.bit_array):
+                # [FIXED] Log warning on mismatch (Issue #10)
+                logger.warning(f"⚠️ Bloom Filter size mismatch. Expected {len(self.bit_array)}, got {file_size}. Starting fresh.")
+                return
+                
+            with open(path, 'rb') as f:
+                self.bit_array = bytearray(f.read())
+                logger.info(f"🌸 Loaded Bloom Filter ({len(self.bit_array)} bytes)")
+        except Exception as e:
+            logger.error(f"Failed to load bloom filter: {e}")

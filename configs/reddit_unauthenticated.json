@@ -1,0 +1,27 @@
+{
+  "name": "reddit_public",
+  "base_url": "https://www.reddit.com",
+  "mode": "list",
+  "rate_limit": 5, 
+  "response_type": "json",
+  "start_urls": [
+    "https://www.reddit.com/r/technology/new.json",
+    "https://www.reddit.com/r/python/hot.json"
+  ],
+  "headers": {
+    "User-Agent": "GliderBot/1.0 (Public Learning Purpose)" 
+  },
+  "fields": [
+    {
+      "name": "posts",
+      "selectors": [{"type": "json", "value": "data.children[*].data"}],
+      "is_list": true,
+      "children": [
+        {"name": "title", "selectors": [{"type": "json", "value": "title"}]},
+        {"name": "author", "selectors": [{"type": "json", "value": "author"}]},
+        {"name": "upvotes", "selectors": [{"type": "json", "value": "ups"}]},
+        {"name": "url", "selectors": [{"type": "json", "value": "url"}]}
+      ]
+    }
+  ]
+}

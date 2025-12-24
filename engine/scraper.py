@@ -19,7 +19,7 @@ from fake_useragent import UserAgent
 
 from engine.bloom import BloomFilter
 from engine.checkpoint import CheckpointManager
-from engine.schemas import ScraperConfig, ScrapeMode, StatsEvent
+from engine.schemas import ScraperConfig, ScrapeMode, StatsEvent, DataField
 from engine.resolver import HtmlResolver, JsonResolver
 from engine.browser import BrowserManager
 
@@ -197,29 +197,83 @@ class ScraperEngine:
                 logger.error(f"Page failed: {e}")
                 break
 
-    async def _process_content(self, content: str, url: str = ""):
-        if self.config.response_type == "json":
-            resolver = JsonResolver(content)
-            data = {}
-            for field in self.config.fields:
-                data[field.name] = resolver.resolve_field(field)
-            await self._merge_data(data)
-            return resolver
+    # [UPDATED] Recursive Content Processing
+    async def _process_content(self, content: str, url: str = "", fields: Optional[List[DataField]] = None) -> Any:
+        current_fields = fields or self.config.fields
+        
+        # 1. Initialize Resolver
+        if self.config.response_type == "json" and not self.config.use_playwright:
+             # Logic fix: If fetching nested HTML link inside JSON mode, we might need HTML resolver
+             # But usually response_type is global. For Reddit, we append .json to links.
+             resolver = JsonResolver(content)
         else:
-            loop = asyncio.get_running_loop()
-            data, resolver = await loop.run_in_executor(None, self._cpu_bound_extract, content)
-            
-            if self.config.debug_mode and url:
-                has_data = False
-                for val in data.values():
-                    if val not in (None, "", []):
-                        has_data = True
-                        break
-                if not has_data:
-                    await self._save_debug_snapshot(content, url)
+             # Playwright always returns HTML, even if source was JSON-like
+             resolver = HtmlResolver(content) # type: ignore
 
-            await self._merge_data(data)
-            return resolver
+        # 2. Extract Data
+        data = {}
+        for field in current_fields:
+            # A. Standard Extraction
+            extracted_value = resolver.resolve_field(field)
+            
+            # B. Link Following (Deep Scrape)
+            if field.follow_url and extracted_value and field.nested_fields:
+                urls_to_follow = extracted_value if isinstance(extracted_value, list) else [extracted_value]
+                nested_results = []
+                
+                logger.info(f"    ↳ Following {len(urls_to_follow)} nested links...")
+                
+                for i, relative_url in enumerate(urls_to_follow):
+                    if i >= 5: break # Safety: limit to 5 children per page
+                    
+                    full_child_url = urljoin(url, str(relative_url))
+                    
+                    # Reddit Specific Hack: Ensure child URL is JSON if mode is JSON
+                    if self.config.response_type == "json" and not full_child_url.endswith(".json"):
+                        # remove query params first
+                        parsed = urlparse(full_child_url)
+                        path = parsed.path.rstrip('/')
+                        full_child_url = f"{parsed.scheme}://{parsed.netloc}{path}.json"
+
+                    try:
+                        # Rate Limit applies to child requests too
+                        async with self.rate_limiter:
+                            child_content = await self._fetch_page(full_child_url)
+                            if child_content:
+                                # Recursively process with nested_fields
+                                child_data = await self._process_content(
+                                    child_content, 
+                                    full_child_url, 
+                                    fields=field.nested_fields
+                                )
+                                # Merge nested data into a flat dict or keep structure?
+                                # _process_content returns resolver usually, but here we want data.
+                                # Wait, _process_content in original returned 'resolver'.
+                                # We need to separate extraction from processing.
+                                
+                                # FIX: The recursive call returns the resolver, but we want the DATA that was merged.
+                                # Since _merge_data is async and decoupled, we can't easily get the return value here.
+                                # Solution: We can't return the data easily because _merge_data pushes to a batch.
+                                # Alternative: We just let the recursive call push data to the main batch!
+                                pass 
+                    except Exception as e:
+                        logger.warning(f"Failed to follow {full_child_url}: {e}")
+
+                # For the parent object, we might just store the URL, 
+                # or we can't store the child data because it's already flushed.
+                data[field.name] = extracted_value
+            else:
+                data[field.name] = extracted_value
+
+        # 3. Save Data (Only if we are at the top level, or if we want to save child entries as separate rows)
+        # Current logic: Scraper flushes rows. 
+        # If we are in a nested call, 'data' contains the fields extracted from the child.
+        # We should merge them.
+        
+        # NOTE: To support "give me as many as you find", we treat every nested hit as a new entry.
+        await self._merge_data(data)
+        
+        return resolver
 
     async def _save_debug_snapshot(self, html: str, url: str):
         try:
@@ -228,11 +282,9 @@ class ScraperEngine:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_name = hashlib.md5(url.encode()).hexdigest()[:8]
             filename = debug_dir / f"fail_{timestamp}_{safe_name}.html"
-            
             async with aiofiles.open(filename, "w", encoding="utf-8") as f:
                 await f.write(f"\n")
                 await f.write(html)
-            
             logger.warning(f"📸 Snapshot saved: {filename}")
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
@@ -248,39 +300,28 @@ class ScraperEngine:
         batch_to_flush = None
         entries = 0
         async with self.data_lock:
-            for key, value in page_data.items():
-                if isinstance(value, list):
-                    for item in value:
-                        item_hash = hashlib.md5(json.dumps(item, sort_keys=True).encode()).hexdigest()
-                        if item_hash not in self.seen_hashes:
-                            self.seen_hashes.add(item_hash)
-                            self.recent_hashes.append(item_hash)
-                            self.pending_batch.append({key: [item]})
-                            entries += 1
-                        elif item_hash not in self.recent_hashes:
-                            self.pending_batch.append({key: [item]})
-                            self.recent_hashes.append(item_hash)
-                            entries += 1
-                else:
-                    self.pending_batch.append({key: value})
+            # Flatten logic: If a field is a list, we often want to explode it.
+            # But for simple extraction, let's just push what we found.
+            
+            # Simple check: If the dict is empty or all None, skip
+            if not any(page_data.values()): return
+
+            self.pending_batch.append(page_data)
             if len(self.pending_batch) >= self.batch_size:
                 batch_to_flush = self.pending_batch.copy()
                 self.pending_batch = []
         
         if batch_to_flush:
             await self._flush_batch(batch_to_flush)
-            if self.stats_callback and entries > 0:
-                self.stats_callback(StatsEvent("entries_added", count=entries))
+            if self.stats_callback:
+                self.stats_callback(StatsEvent("entries_added", count=len(batch_to_flush)))
 
     async def _flush_batch(self, batch: List[Dict]):
         if self.output_callback and batch:
-            combined = {}
-            for item in batch:
-                for k, v in item.items():
-                    if k not in combined: combined[k] = []
-                    if isinstance(v, list): combined[k].extend(v)
-                    else: combined[k].append(v)
-            await self.output_callback(combined)
+            # For JSON output, we want a list of objects. 
+            # The current logic attempts to combine keys, which is good for columnar data,
+            # but for a stream of "Discord Links", a list of dicts is better.
+            await self.output_callback({"items": batch}) 
 
     async def _flush_remaining_batches(self):
         async with self.data_lock:
@@ -288,47 +329,27 @@ class ScraperEngine:
             self.pending_batch = []
         if batch: await self._flush_batch(batch)
 
-    # --- FIX: STRICT TYPING FOR AUTH ---
+    # --- AUTH LOGIC (UNCHANGED BUT INCLUDED FOR COMPLETENESS) ---
     async def ensure_active_token(self):
         if not self.config.authentication:
             return
-
-        # Buffer of 60 seconds
         if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
             return
-
         logger.info(f"🔄 Refreshing OAuth Token for {self.config.authentication.type}...")
         auth_config = self.config.authentication
-        
-        # FIX 1: Ensure session is not None
-        if not self.session:
-            self._init_session()
-        
-        # Explicit guard for static analyzer
-        if not self.session:
-            raise RuntimeError("Failed to initialize session")
-
+        if not self.session: self._init_session()
+        if not self.session: raise RuntimeError("Failed to initialize session")
         try:
             if auth_config.type == "oauth_password":
-                # FIX 2: Ensure strictly strings (no None) for auth tuple
-                # "or ''" handles the Optional[str] -> str conversion
                 client_id = auth_config.client_id or ""
                 client_secret = auth_config.client_secret or ""
-                
-                # FIX 3: Ensure strictly string dict for data
                 payload = {
                     "grant_type": "password",
                     "username": auth_config.username or "",
                     "password": auth_config.password or "",
                     "scope": auth_config.scope or "*"
                 }
-
-                response = await self.session.post(
-                    str(auth_config.token_url),
-                    auth=(client_id, client_secret),
-                    data=payload
-                )
-                
+                response = await self.session.post(str(auth_config.token_url), auth=(client_id, client_secret), data=payload)
                 if response.status_code == 200:
                     data = response.json()
                     self.auth_token = data.get("access_token")
@@ -338,24 +359,16 @@ class ScraperEngine:
                 else:
                     logger.error(f"❌ Auth Failed: {response.status_code} - {response.text}")
                     raise Exception("Authentication Failed")
-                    
         except Exception as e:
             logger.error(f"Auth Error: {e}")
             raise e
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
-        # 1. Handle Auto-Refresh
-        if self.config.authentication:
-            await self.ensure_active_token()
-
-        # 2. Build Headers
+        if self.config.authentication: await self.ensure_active_token()
         headers = self.config.headers.copy() if self.config.headers else {}
         headers["User-Agent"] = self.ua_rotator.random
-        
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
-
+        if self.auth_token: headers["Authorization"] = f"Bearer {self.auth_token}"
         current_proxy = self._get_next_proxy()
         
         if self.browser_manager:
@@ -364,20 +377,10 @@ class ScraperEngine:
             if not self.session: return ""
             try:
                 proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
-                
-                response = await self.session.get(
-                    url, 
-                    timeout=15, 
-                    proxies=proxies, 
-                    headers=headers
-                )
-                
-                if response.status_code == 200:
-                    return response.text
-                elif response.status_code in [403, 429, 401]:
-                    raise Exception(f"Blocked/Auth Error: {response.status_code}")
-                else:
-                    return ""
+                response = await self.session.get(url, timeout=15, proxies=proxies, headers=headers)
+                if response.status_code == 200: return response.text
+                elif response.status_code in [403, 429, 401]: raise Exception(f"Blocked/Auth Error: {response.status_code}")
+                else: return ""
             except Exception as e:
                 logger.warning(f"Network Error: {e}")
                 raise e

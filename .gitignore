@@ -213,6 +213,7 @@ __pycache__/
 data/*.csv
 data/*.json
 data/*.jsonl
+data/*.bloom
 data/checkpoints.db
 debug/
 ignore_config/

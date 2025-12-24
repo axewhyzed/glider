@@ -48,7 +48,10 @@ class BrowserManager:
 
     async def _create_context(self):
         if self.context:
-            await self.context.close()
+            try:
+                await self.context.close()
+            except Exception as e:
+                logger.warning(f"Failed to close old context: {e}")
         
         if not self.browser:
              raise RuntimeError("Browser not initialized")

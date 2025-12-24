@@ -125,15 +125,18 @@ class ScraperConfig(BaseModel):
     debug_mode: bool = False
     concurrency: int = 2
     rate_limit: int = 5
-    request_timeout: int = 15 # <--- NEW: Configurable Timeout
+    request_timeout: int = 15
     min_delay: int = 1
     max_delay: int = 3
+    
+    # [FIXED] Configurable Nested Limit
+    max_nested_urls: int = Field(default=5, ge=1, le=100)
     
     wait_for_selector: Optional[str] = None
     interactions: Optional[List[Interaction]] = []
     proxies: Optional[List[str]] = None
     headers: Optional[Dict[str, str]] = None
-    cookies_file: Optional[str] = None # <--- NEW: Cookies
+    cookies_file: Optional[str] = None 
     authentication: Optional[AuthConfig] = None
     
     respect_robots_txt: bool = False

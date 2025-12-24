@@ -16,14 +16,14 @@ Built on **Python 3.11+**, it leverages **AsyncIO**, **Playwright**, and **Curl_
     * **User-Agents:** Rotates HTTP headers per session to match the browser profile.
     * **Proxy Support:** Built-in proxy rotation with automatic failover.
 
-### 🔐 **Authentication & API Support (NEW in v2.7)**
+### 🔐 **Authentication & API Support (v2.7)**
 * **OAuth 2.0 Password Flow:** Automatic token acquisition and refresh with expiry tracking.
 * **Bearer Token Injection:** Seamless authorization header management.
 * **JSON API Scraping:** Native support for REST APIs with automatic JSON parsing.
 * **Cookie Persistence:** Load and maintain session cookies from file.
 * **Proxy-Safe Authentication:** Auth requests respect proxy configuration to prevent IP leaks.
 
-### 🔗 **Recursive Data Linking (NEW in v2.7)**
+### 🔗 **Recursive Data Linking (v2.7)**
 * **Follow Links Automatically:** Extract nested data by following `href` attributes to child pages.
 * **Multi-Level Scraping:** Scrape product → reviews → user profiles in a single run.
 * **Parent-Child Tracking:** Automatically injects `_source_url` and `_parent_url` for data lineage.
@@ -34,6 +34,7 @@ Built on **Python 3.11+**, it leverages **AsyncIO**, **Playwright**, and **Curl_
 * **Automated UI Actions:** Define sequences to Click, Scroll, Type, or Wait before scraping (e.g., clicking "Load More", filling search bars).
 * **Smart Waits:** Handles dynamic AJAX loading seamlessly.
 * **Retry Logic:** Each interaction retried once before failing.
+* **Memory-Safe Cleanup:** Browser contexts properly closed to prevent memory leaks (v2.7.1).
 
 ### 📊 **Observability & Reliability**
 * **Live Dashboard:** Real-time terminal UI showing RPS, success/failure counts, and blocks.
@@ -41,6 +42,7 @@ Built on **Python 3.11+**, it leverages **AsyncIO**, **Playwright**, and **Curl_
 * **Crash-Proof Writes:** Streams data to disk (`temp_stream.jsonl`) line-by-line. Zero data loss guarantee.
 * **Ethical Compliance:** Built-in `robots.txt` parser to respect site policies.
 * **Debug Snapshots:** Auto-saves failed pages as HTML for debugging.
+* **Enhanced Error Handling:** Worker exceptions properly logged and sessions cleaned up on auth failures (v2.7.1).
 
 ### ⚡ **Performance**
 * **Fully Async:** Built on `asyncio` for non-blocking I/O.
@@ -152,7 +154,7 @@ Create a new JSON file in `configs/` to scrape a new site.
 | `proxies` | List of proxy URLs for rotation. | `[]` |
 | `cookies_file` | Path to JSON file with cookies. | `null` |
 
-### Authentication Configuration (NEW in v2.7)
+### Authentication Configuration (v2.7)
 
 For APIs requiring OAuth 2.0 authentication:
 
@@ -170,7 +172,7 @@ For APIs requiring OAuth 2.0 authentication:
 }
 ```
 
-### Recursive Data Linking (NEW in v2.7)
+### Recursive Data Linking (v2.7)
 
 Follow links to scrape nested data:
 
@@ -277,21 +279,42 @@ glider/
 
 ---
 
-## 🆕 What's New in v2.7
+## 🆕 What's New
 
-### Critical Security & Stability Fixes
+### v2.7.1 - Critical Stability Patch (December 24, 2025)
+
+#### 🔥 Critical Fixes
+✅ **Browser Memory Leak Fixed:** Playwright browser contexts now properly closed after each page scrape  
+✅ **Worker Exception Handling:** Worker thread exceptions no longer swallowed; all errors logged  
+✅ **Session Cleanup on Auth Failure:** Sessions properly cleaned up when OAuth authentication fails  
+✅ **Type Safety Improvements:** Fixed `Never` type issues in error handling paths  
+
+#### 🛡️ Enhanced Security & Safety
+✅ **Proxy Safety:** Cookie files now respect proxy configuration (no IP leaks)  
+✅ **Recursion Safety:** Additional safeguards against infinite loops in nested scraping  
+✅ **Bloom Filter Deduplication:** Improved URL deduplication logic  
+
+#### 📝 Improved Logging
+✅ **Enhanced Worker Logging:** All worker operations now logged with context  
+✅ **Better Interaction Logs:** Browser interactions include detailed timing and retry information  
+
+**Upgrade Recommendation:** All v2.7 users should upgrade immediately to prevent memory leaks in long-running scrapes.
+
+### v2.7 - Major Feature Release (December 24, 2025)
+
+#### Critical Security & Stability Fixes
 ✅ **Security Leak Resolution:** Fixed critical security vulnerabilities in authentication flow  
 ✅ **Infinite Loop Prevention:** Added safeguards against circular link following  
 ✅ **Proxy-Safe Auth:** OAuth requests now respect proxy configuration  
 
-### New Features
+#### New Features
 🔐 **OAuth 2.0 Support:** Automatic token management with refresh logic  
 🔗 **Recursive Data Linking:** Follow links to scrape nested content automatically  
 📊 **JSON API Scraping:** Native support for REST APIs with JSONPath selectors  
 🍪 **Cookie Management:** Load session cookies from JSON file  
 🐛 **Debug Snapshots:** Failed pages auto-saved to `debug/` folder  
 
-### Performance Improvements
+#### Performance Improvements
 ⚡ **Rate Limiter for Child Requests:** Nested scrapes respect parent rate limits  
 🧠 **Smart Checkpoint Recovery:** Incomplete URLs from crashes are re-queued intelligently  
 📝 **Enhanced Logging:** Detailed interaction logs with retry information  

@@ -1,37 +1,57 @@
+import json
+import os
 import re
-from typing import List, Any, Dict, Optional
-from engine.schemas import Transformer, TransformerType
+from pathlib import Path
+from typing import Any, List, Union, Dict
+from engine.schemas import TransformerType
 
-def apply_transformers(text: Optional[str], transformers: List[Transformer]) -> Any:
-    if not text: return None
-    current_value = text
-    
-    for t in transformers:
-        if t.name == TransformerType.STRIP and isinstance(current_value, str):
-            current_value = current_value.strip()
-        elif t.name == TransformerType.TO_FLOAT:
-            try:
-                val_str = str(current_value).strip()
-                decimal_sep = t.args[0] if t.args and len(t.args) >= 1 else "."
-                thousand_sep = t.args[1] if t.args and len(t.args) >= 2 else ","
-                clean = re.sub(r'[^\d.-]', '', val_str.replace(thousand_sep, "").replace(decimal_sep, "."))
-                current_value = float(clean)
-            except ValueError: current_value = 0.0
-        elif t.name == TransformerType.TO_INT:
-            try: current_value = int(re.sub(r'[^\d]', '', str(current_value)))
-            except ValueError: current_value = 0
-        elif t.name == TransformerType.REGEX and t.args:
-            match = re.search(t.args[0], str(current_value))
-            current_value = match.group(1) if match and match.groups() else (match.group(0) if match else None)
-        elif t.name == TransformerType.REPLACE and t.args and len(t.args) >= 2:
-            current_value = str(current_value).replace(t.args[0], t.args[1])
+def apply_transformers(value: Any, transformers: List[Any]) -> Any:
+    if value is None:
+        return None
+        
+    for transformer in transformers:
+        name = transformer.name
+        args = transformer.args
+        
+        try:
+            if name == TransformerType.STRIP:
+                if isinstance(value, str):
+                    value = value.strip()
+            elif name == TransformerType.TO_FLOAT:
+                value = float(value)
+            elif name == TransformerType.TO_INT:
+                value = int(float(value)) # Handle "12.0" -> 12
+            elif name == TransformerType.REGEX:
+                if isinstance(value, str) and args:
+                    pattern = args[0]
+                    match = re.search(pattern, value)
+                    if match:
+                        value = match.group(1) if match.groups() else match.group(0)
+                    else:
+                        value = None
+            elif name == TransformerType.REPLACE:
+                if isinstance(value, str) and len(args) >= 2:
+                    value = value.replace(args[0], args[1])
+        except Exception:
+            # If transformation fails, keep original value or None? 
+            # Usually better to return None or log error. 
+            # For resilience, we keep the value but maybe it's wrong type.
+            pass
             
-    return current_value
+    return value
 
-def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
-    items = []
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict): items.extend(flatten_dict(v, new_key, sep=sep).items())
-        else: items.append((new_key, v))
-    return dict(items)
+def load_config(path: str) -> Dict[str, Any]:
+    """Loads JSON config with Environment Variable expansion."""
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Expand ${VAR} or $VAR
+    # Matches ${VAR} or $VAR
+    pattern = re.compile(r'\$\{([^}]+)\}|\$([a-zA-Z0-9_]+)')
+    
+    def replace_env(match):
+        var_name = match.group(1) or match.group(2)
+        return os.environ.get(var_name, match.group(0)) # Return original if not found
+        
+    expanded_content = pattern.sub(replace_env, content)
+    return json.loads(expanded_content)

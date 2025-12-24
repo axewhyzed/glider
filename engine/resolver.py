@@ -1,8 +1,75 @@
+import json
+from jsonpath_ng import parse
 from lxml import html as lxml_html
 from typing import Any, List, Optional
-from loguru import logger  # Added logger
+from loguru import logger
 from engine.schemas import DataField, SelectorType
 from engine.utils import apply_transformers
+
+class JsonResolver:
+    """
+    Parses JSON content and resolves DataFields using JSONPath.
+    """
+    def __init__(self, content: str):
+        try:
+            self.data = json.loads(content)
+        except json.JSONDecodeError:
+            self.data = {}
+            logger.error("❌ Failed to parse JSON content")
+
+    def resolve_field(self, field: DataField, context: Any = None) -> Any:
+        # Use provided context (for children) or root data
+        current_data = context if context is not None else self.data
+        results = []
+
+        for selector in field.selectors:
+            if selector.type == SelectorType.JSON:
+                try:
+                    jsonpath_expr = parse(selector.value)
+                    matches = jsonpath_expr.find(current_data)
+                    # Extract the actual value from the Datum object
+                    results.extend([match.value for match in matches])
+                except Exception as e:
+                    logger.warning(f"JSONPath Error ({selector.value}): {e}")
+
+        # Handle Children (Recursive)
+        if field.children and results:
+            return self._resolve_children(field, results)
+
+        if field.is_list:
+            return results
+        
+        # Apply transformers to single result
+        val = results[0] if results else None
+        return apply_transformers(val, field.transformers)
+
+    def _resolve_children(self, parent_field: DataField, items: List[Any]) -> Any:
+        extracted_data = []
+        for item in items:
+            row_data = {}
+            children = parent_field.children or []
+            for child in children:
+                # Recursively resolve child using 'item' as context
+                child_val = self.resolve_field(child, context=item)
+                row_data[child.name] = child_val
+            extracted_data.append(row_data)
+
+        if parent_field.is_list:
+            return extracted_data
+        return extracted_data[0] if extracted_data else None
+
+    def get_attribute(self, selector_obj, attribute: str) -> Optional[str]:
+        # JSON doesn't really have "attributes", but we can define custom behavior here if needed.
+        # For simple pagination where the next link is a field value:
+        if selector_obj.type == SelectorType.JSON:
+             try:
+                jsonpath_expr = parse(selector_obj.value)
+                matches = jsonpath_expr.find(self.data)
+                if matches:
+                    return str(matches[0].value)
+             except Exception:
+                 pass
+        return None
 
 class HtmlResolver:
     """
@@ -40,7 +107,6 @@ class HtmlResolver:
             elif type_ == SelectorType.XPATH:
                 return element.xpath(value)
         except Exception as e:
-            # FIX: Log the error so we know why extraction failed
             logger.error(f"Selector Error ({type_}: {value}): {e}")
             return []
         return []

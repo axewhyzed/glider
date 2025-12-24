@@ -11,6 +11,7 @@ curl_cffi==0.14.0
 fake-useragent==2.2.0
 greenlet==3.3.0
 iniconfig==2.3.0
+jsonpath-ng==1.7.0
 loguru==0.7.3
 lxml==6.0.2
 markdown-it-py==4.0.0
@@ -19,6 +20,7 @@ packaging==25.0
 playwright==1.57.0
 playwright-stealth==1.0.6
 pluggy==1.6.0
+ply==3.11
 pycparser==2.23
 pydantic==2.12.5
 pydantic_core==2.41.5

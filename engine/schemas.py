@@ -12,6 +12,7 @@ class StatsEvent:
 class SelectorType(str, Enum):
     CSS = "css"
     XPATH = "xpath"
+    JSON = "json"  # <--- NEW
 
 class TransformerType(str, Enum):
     STRIP = "strip"
@@ -99,6 +100,16 @@ class Pagination(BaseModel):
         if v < 1: raise ValueError('max_pages must be at least 1')
         return v
 
+# --- NEW AUTH CONFIG ---
+class AuthConfig(BaseModel):
+    type: Literal["oauth_password", "bearer"] = "oauth_password"
+    token_url: Optional[HttpUrl] = None
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    scope: Optional[str] = "*"
+
 class ScraperConfig(BaseModel):
     name: str
     base_url: Optional[HttpUrl] = None
@@ -106,8 +117,9 @@ class ScraperConfig(BaseModel):
     start_urls: Optional[List[HttpUrl]] = []
     
     # Engine Settings
+    response_type: Literal["html", "json"] = "html"  # <--- NEW
     use_playwright: bool = False
-    debug_mode: bool = False  # <--- NEW FLAG
+    debug_mode: bool = False
     concurrency: int = 2
     rate_limit: int = 5
     min_delay: int = 1
@@ -116,6 +128,11 @@ class ScraperConfig(BaseModel):
     wait_for_selector: Optional[str] = None
     interactions: Optional[List[Interaction]] = []
     proxies: Optional[List[str]] = None
+    
+    # New Header & Auth Fields
+    headers: Optional[Dict[str, str]] = None
+    authentication: Optional[AuthConfig] = None
+    
     respect_robots_txt: bool = False
     use_checkpointing: bool = False
     

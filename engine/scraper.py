@@ -4,7 +4,7 @@ import hashlib
 import json
 import urllib.robotparser
 import aiofiles
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, Awaitable, cast
 from urllib.parse import urljoin, urlparse
@@ -20,7 +20,7 @@ from fake_useragent import UserAgent
 from engine.bloom import BloomFilter
 from engine.checkpoint import CheckpointManager
 from engine.schemas import ScraperConfig, ScrapeMode, StatsEvent
-from engine.resolver import HtmlResolver
+from engine.resolver import HtmlResolver, JsonResolver
 from engine.browser import BrowserManager
 
 class ScraperEngine:
@@ -52,6 +52,10 @@ class ScraperEngine:
         self.batch_size = 10
         self.pending_batch: List[Dict[str, Any]] = []
         self.shutdown_requested = False
+
+        # Authentication State
+        self.auth_token: Optional[str] = None
+        self.token_expires_at: datetime = datetime.min
 
     async def run(self):
         logger.info(f"🚀 Starting Engine for: {self.config.name}")
@@ -147,13 +151,13 @@ class ScraperEngine:
         async with self.rate_limiter:
             await self.checkpoint.mark_in_progress(url)
             try:
-                html = await self._fetch_page(url)
-                if html:
-                    await self._process_content(html, url)
+                content = await self._fetch_page(url)
+                if content:
+                    await self._process_content(content, url)
                     await self.checkpoint.mark_done(url)
                     if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                 else:
-                    raise Exception("Empty HTML")
+                    raise Exception("Empty Content")
             except Exception as e:
                 logger.error(f"Failed {url}: {e}")
                 self.failed_urls.append(url)
@@ -172,10 +176,10 @@ class ScraperEngine:
             await self.checkpoint.mark_in_progress(current_url)
             
             try:
-                html = await self._fetch_page(current_url)
-                if not html: raise Exception("Empty")
+                content = await self._fetch_page(current_url)
+                if not content: raise Exception("Empty")
                 
-                resolver = await self._process_content(html, current_url)
+                resolver = await self._process_content(content, current_url)
                 await self.checkpoint.mark_done(current_url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                 
@@ -193,25 +197,29 @@ class ScraperEngine:
                 logger.error(f"Page failed: {e}")
                 break
 
-    async def _process_content(self, html: str, url: str = "") -> HtmlResolver:
-        loop = asyncio.get_running_loop()
-        data, resolver = await loop.run_in_executor(None, self._cpu_bound_extract, html)
-        
-        # --- Debug Logic ---
-        # Only check for snapshot if debug_mode is True
-        if self.config.debug_mode and url:
-            has_data = False
-            for val in data.values():
-                if val not in (None, "", []):
-                    has_data = True
-                    break
+    async def _process_content(self, content: str, url: str = ""):
+        if self.config.response_type == "json":
+            resolver = JsonResolver(content)
+            data = {}
+            for field in self.config.fields:
+                data[field.name] = resolver.resolve_field(field)
+            await self._merge_data(data)
+            return resolver
+        else:
+            loop = asyncio.get_running_loop()
+            data, resolver = await loop.run_in_executor(None, self._cpu_bound_extract, content)
             
-            if not has_data:
-                await self._save_debug_snapshot(html, url)
-        # -------------------
+            if self.config.debug_mode and url:
+                has_data = False
+                for val in data.values():
+                    if val not in (None, "", []):
+                        has_data = True
+                        break
+                if not has_data:
+                    await self._save_debug_snapshot(content, url)
 
-        await self._merge_data(data)
-        return resolver
+            await self._merge_data(data)
+            return resolver
 
     async def _save_debug_snapshot(self, html: str, url: str):
         try:
@@ -280,21 +288,94 @@ class ScraperEngine:
             self.pending_batch = []
         if batch: await self._flush_batch(batch)
 
+    # --- FIX: STRICT TYPING FOR AUTH ---
+    async def ensure_active_token(self):
+        if not self.config.authentication:
+            return
+
+        # Buffer of 60 seconds
+        if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
+            return
+
+        logger.info(f"🔄 Refreshing OAuth Token for {self.config.authentication.type}...")
+        auth_config = self.config.authentication
+        
+        # FIX 1: Ensure session is not None
+        if not self.session:
+            self._init_session()
+        
+        # Explicit guard for static analyzer
+        if not self.session:
+            raise RuntimeError("Failed to initialize session")
+
+        try:
+            if auth_config.type == "oauth_password":
+                # FIX 2: Ensure strictly strings (no None) for auth tuple
+                # "or ''" handles the Optional[str] -> str conversion
+                client_id = auth_config.client_id or ""
+                client_secret = auth_config.client_secret or ""
+                
+                # FIX 3: Ensure strictly string dict for data
+                payload = {
+                    "grant_type": "password",
+                    "username": auth_config.username or "",
+                    "password": auth_config.password or "",
+                    "scope": auth_config.scope or "*"
+                }
+
+                response = await self.session.post(
+                    str(auth_config.token_url),
+                    auth=(client_id, client_secret),
+                    data=payload
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    self.auth_token = data.get("access_token")
+                    expires_in = data.get("expires_in", 3600)
+                    self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+                    logger.success(f"✅ Token Refreshed! Expires in {expires_in}s")
+                else:
+                    logger.error(f"❌ Auth Failed: {response.status_code} - {response.text}")
+                    raise Exception("Authentication Failed")
+                    
+        except Exception as e:
+            logger.error(f"Auth Error: {e}")
+            raise e
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
+        # 1. Handle Auto-Refresh
+        if self.config.authentication:
+            await self.ensure_active_token()
+
+        # 2. Build Headers
+        headers = self.config.headers.copy() if self.config.headers else {}
+        headers["User-Agent"] = self.ua_rotator.random
+        
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
         current_proxy = self._get_next_proxy()
+        
         if self.browser_manager:
             return await self.browser_manager.fetch_page(url)
         else:
             if not self.session: return ""
             try:
                 proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
-                self.session.cookies.clear()
-                response = await self.session.get(url, timeout=15, proxies=proxies, headers={"User-Agent": self.ua_rotator.random})
+                
+                response = await self.session.get(
+                    url, 
+                    timeout=15, 
+                    proxies=proxies, 
+                    headers=headers
+                )
+                
                 if response.status_code == 200:
                     return response.text
-                elif response.status_code in [403, 429]:
-                    raise Exception(f"Blocked: {response.status_code}")
+                elif response.status_code in [403, 429, 401]:
+                    raise Exception(f"Blocked/Auth Error: {response.status_code}")
                 else:
                     return ""
             except Exception as e:

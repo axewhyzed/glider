@@ -129,7 +129,7 @@ class ScraperConfig(BaseModel):
     min_delay: int = 1
     max_delay: int = 3
     
-    # [FIXED] Configurable Nested Limit
+    # Nested Scraping Limits
     max_nested_urls: int = Field(default=5, ge=1, le=100)
     
     wait_for_selector: Optional[str] = None

@@ -10,7 +10,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any
-from loguru import logger  # <--- Added logger
+from loguru import logger
 
 class BloomFilter:
     """
@@ -81,7 +81,6 @@ class BloomFilter:
         try:
             file_size = os.path.getsize(path)
             if file_size != len(self.bit_array):
-                # [FIXED] Log warning on mismatch (Issue #10)
                 logger.warning(f"⚠️ Bloom Filter size mismatch. Expected {len(self.bit_array)}, got {file_size}. Starting fresh.")
                 return
                 

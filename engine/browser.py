@@ -66,7 +66,7 @@ class BrowserManager:
         if self.playwright: await self.playwright.stop()
         self.playwright = None
 
-    # [FIXED] Added headers support (Issue #7)
+    # [FIXED] Added headers support
     async def fetch_page(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
         """Fetch a page content handling context rotation and interactions."""
         if not self.context:
@@ -80,7 +80,7 @@ class BrowserManager:
 
         page = await self.context.new_page()
         try:
-            # 1. Apply Headers (for Auth/Cookies)
+            # 1. Apply Headers (for Auth)
             if headers:
                 await page.set_extra_http_headers(headers)
 
@@ -109,7 +109,6 @@ class BrowserManager:
             await page.close()
 
     async def _handle_interactions(self, page: Page):
-        # Fix: Handle None safely before iterating
         interactions = self.config.interactions or []
         
         for action in interactions:

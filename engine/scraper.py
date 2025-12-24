@@ -47,7 +47,12 @@ class ScraperEngine:
         
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
         self.ua_rotator = UserAgent()
-        self.proxy_pool = cycle(config.proxies) if config.proxies else None
+        
+        # [FIXED] Safe Proxy Initialization
+        if config.proxies and len(config.proxies) > 0:
+            self.proxy_pool = cycle(config.proxies)
+        else:
+            self.proxy_pool = None
         
         self.batch_size = 10
         self.pending_batch: List[Dict[str, Any]] = []
@@ -56,7 +61,7 @@ class ScraperEngine:
         # Authentication State
         self.auth_token: Optional[str] = None
         self.token_expires_at: datetime = datetime.min
-        self._auth_lock = asyncio.Lock() # [FIXED] Auth Lock
+        self._auth_lock = asyncio.Lock() 
 
     async def run(self):
         logger.info(f"🚀 Starting Engine for: {self.config.name}")
@@ -95,12 +100,19 @@ class ScraperEngine:
     def _init_session(self):
         browser_choice = random.choice(["chrome110", "chrome120", "chrome100", "safari17_0"])
         cookies = None
+        
+        # [FIXED] Cookie Validation
         if self.config.cookies_file:
             try:
                 with open(self.config.cookies_file, 'r') as f:
-                    cookies = json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        cookies = {str(k): str(v) for k, v in loaded.items()}
+                        logger.info(f"🍪 Loaded {len(cookies)} cookies")
+                    else:
+                        logger.error("❌ Invalid cookie format: Root must be a dictionary")
             except Exception as e:
-                logger.error(f"Failed to load cookies: {e}")
+                logger.error(f"❌ Failed to load cookies: {e}")
 
         self.session = AsyncSession(
             impersonate=cast(Any, browser_choice),
@@ -153,7 +165,10 @@ class ScraperEngine:
                 try: await self._process_url(url)
                 finally: queue.task_done()
             except asyncio.CancelledError: break
-            except Exception: pass
+            
+            # [FIXED] Log Worker Exceptions
+            except Exception as e:
+                logger.exception(f"Worker crashed on URL: {e}")
 
     async def _process_url(self, url: str):
         if not self._is_allowed(url):
@@ -174,7 +189,6 @@ class ScraperEngine:
             except Exception as e:
                 logger.error(f"Failed {url}: {e}")
                 
-                # [FIXED] Snapshot on Failure
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, url)
                 
@@ -194,7 +208,6 @@ class ScraperEngine:
             await self.checkpoint.mark_in_progress(current_url)
             
             try:
-                # [FIXED] Apply Rate Limiter to Pagination
                 async with self.rate_limiter:
                     content = await self._fetch_page(current_url)
                 
@@ -218,7 +231,6 @@ class ScraperEngine:
                     current_url = None
             except Exception as e:
                 logger.error(f"Page failed: {e}")
-                # [FIXED] Snapshot on Pagination Failure
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, current_url)
                 break
@@ -239,7 +251,6 @@ class ScraperEngine:
                 urls_to_follow = extracted_value if isinstance(extracted_value, list) else [extracted_value]
                 nested_results_list = []
                 
-                # [FIXED] Configurable Limit
                 max_urls = self.config.max_nested_urls
                 urls_to_follow = urls_to_follow[:max_urls]
                 
@@ -258,7 +269,6 @@ class ScraperEngine:
                     if self.checkpoint.is_done(full_child_url): continue
                     
                     try:
-                        # [FIXED] Mark In-Progress BEFORE Fetch
                         await self.checkpoint.mark_in_progress(full_child_url)
                         
                         async with self.rate_limiter:
@@ -304,12 +314,9 @@ class ScraperEngine:
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
 
-    # [FIXED] Removed Dead Code `_cpu_bound_extract`
-
     async def _merge_data(self, page_data: Dict[str, Any]):
         if not any(page_data.values()): return
 
-        # [FIXED] Restored Deduplication Logic
         data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True).encode()).hexdigest()
         
         if data_hash in self.seen_hashes:
@@ -348,7 +355,6 @@ class ScraperEngine:
         if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
             return
 
-        # [FIXED] Thread-safe Auth Refresh
         async with self._auth_lock:
             if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
                 return
@@ -393,6 +399,10 @@ class ScraperEngine:
                         
             except Exception as e:
                 logger.error(f"Auth Error: {e}")
+                # [FIXED] Cleanup Session on Auth Failure
+                if self.session:
+                    await self.session.close()
+                self.session = None
                 raise e
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))

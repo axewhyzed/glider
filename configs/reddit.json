@@ -1,0 +1,26 @@
+{
+  "name": "reddit_api",
+  "base_url": "https://oauth.reddit.com",
+  "response_type": "json",
+  "authentication": {
+    "type": "oauth_password",
+    "token_url": "https://www.reddit.com/api/v1/access_token",
+    "client_id": "YOUR_REDDIT_APP_ID",
+    "client_secret": "YOUR_REDDIT_APP_SECRET",
+    "username": "YOUR_REDDIT_USERNAME",
+    "password": "YOUR_REDDIT_PASSWORD"
+  },
+  "fields": [
+    {
+      "name": "posts",
+      "selectors": [{"type": "json", "value": "data.children[*].data"}],
+      "is_list": true,
+      "children": [
+        {"name": "title", "selectors": [{"type": "json", "value": "title"}]},
+        {"name": "author", "selectors": [{"type": "json", "value": "author"}]},
+        {"name": "score", "selectors": [{"type": "json", "value": "score"}]},
+        {"name": "url", "selectors": [{"type": "json", "value": "url"}]}
+      ]
+    }
+  ]
+}

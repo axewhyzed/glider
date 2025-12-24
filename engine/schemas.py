@@ -13,7 +13,7 @@ class SelectorType(str, Enum):
     CSS = "css"
     XPATH = "xpath"
     JSON = "json"
-    REGEX = "regex" # <--- NEW: Selects from raw content
+    REGEX = "regex"
 
 class TransformerType(str, Enum):
     STRIP = "strip"
@@ -72,7 +72,7 @@ class DataField(BaseModel):
     transformers: List[Transformer] = []
     children: Optional[List['DataField']] = None
     
-    # --- NEW: Nested Scraping Logic ---
+    # Nested Scraping Logic
     follow_url: bool = False
     nested_fields: Optional[List['DataField']] = None 
     
@@ -125,6 +125,7 @@ class ScraperConfig(BaseModel):
     debug_mode: bool = False
     concurrency: int = 2
     rate_limit: int = 5
+    request_timeout: int = 15 # <--- NEW: Configurable Timeout
     min_delay: int = 1
     max_delay: int = 3
     
@@ -132,6 +133,7 @@ class ScraperConfig(BaseModel):
     interactions: Optional[List[Interaction]] = []
     proxies: Optional[List[str]] = None
     headers: Optional[Dict[str, str]] = None
+    cookies_file: Optional[str] = None # <--- NEW: Cookies
     authentication: Optional[AuthConfig] = None
     
     respect_robots_txt: bool = False

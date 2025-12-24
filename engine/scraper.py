@@ -399,10 +399,6 @@ class ScraperEngine:
                 if session_to_close:
                     await session_to_close.close()
                 raise e
-        
-        # Cleanup outside lock
-        if session_to_close:
-            await session_to_close.close()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
@@ -423,7 +419,11 @@ class ScraperEngine:
             if not self.session: raise RuntimeError("Session not initialized")
             try:
                 proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
-                response = await self.session.get(
+                
+                # [FIXED] Cast to Any because Pylance misidentifies AsyncSession.get return type as Never
+                session: Any = self.session
+                
+                response = await session.get(
                     url, 
                     timeout=self.config.request_timeout, 
                     proxies=proxies, 

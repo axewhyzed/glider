@@ -107,7 +107,14 @@ class ScraperEngine:
                 with open(self.config.cookies_file, 'r') as f:
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
-                        cookies = {str(k): str(v) for k, v in loaded.items()}
+                        cookies = {}
+                        for k, v in loaded.items():
+                            if v is None:
+                                continue  # Skip None values
+                            if isinstance(v, (str, int, float, bool)):
+                                cookies[str(k)] = str(v)
+                            else:
+                                logger.warning(f"Skipping invalid cookie {k}: {type(v)}")
                         logger.info(f"🍪 Loaded {len(cookies)} cookies")
                     else:
                         logger.error("❌ Invalid cookie format: Root must be a dictionary")
@@ -137,7 +144,8 @@ class ScraperEngine:
             self.robots_parser = urllib.robotparser.RobotFileParser()
             self.robots_parser.set_url(url)
             await asyncio.get_running_loop().run_in_executor(None, self.robots_parser.read)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to fetch robots.txt: {e}. Proceeding without restrictions.")
             self.robots_parser = None
 
     def _is_allowed(self, url: str) -> bool:

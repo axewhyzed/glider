@@ -48,7 +48,6 @@ class ScraperEngine:
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
         self.ua_rotator = UserAgent()
         
-        # [FIXED] Safe Proxy Initialization
         if config.proxies and len(config.proxies) > 0:
             self.proxy_pool = cycle(config.proxies)
         else:
@@ -58,7 +57,6 @@ class ScraperEngine:
         self.pending_batch: List[Dict[str, Any]] = []
         self.shutdown_requested = False
 
-        # Authentication State
         self.auth_token: Optional[str] = None
         self.token_expires_at: datetime = datetime.min
         self._auth_lock = asyncio.Lock() 
@@ -79,6 +77,10 @@ class ScraperEngine:
                 await self._run_list_mode(incomplete_urls)
             else:
                 await self._run_pagination_mode()
+            
+            # [FIX #1] Prevent Data Loss on Success
+            await self._flush_remaining_batches()
+
         except asyncio.CancelledError:
             logger.warning("⚠️ Shutdown requested - flushing data...")
             await self._flush_remaining_batches()
@@ -101,21 +103,17 @@ class ScraperEngine:
         browser_choice = random.choice(["chrome110", "chrome120", "chrome100", "safari17_0"])
         cookies = {} 
         
-        # [FIXED] Cookie Validation
         if self.config.cookies_file:
             try:
                 with open(self.config.cookies_file, 'r') as f:
                     loaded = json.load(f)
                     if isinstance(loaded, dict):
-                        # Strict Type Checking & None Skipping
                         for k, v in loaded.items():
-                            if v is None:
-                                continue
+                            if v is None: continue
                             if isinstance(v, (str, int, float, bool)):
                                 cookies[str(k)] = str(v)
                             else:
                                 logger.warning(f"Skipping invalid cookie {k}: {type(v)}")
-                        
                         logger.info(f"🍪 Loaded {len(cookies)} cookies")
                     else:
                         logger.error("❌ Invalid cookie format: Root must be a dictionary")
@@ -146,7 +144,6 @@ class ScraperEngine:
             self.robots_parser.set_url(url)
             await asyncio.get_running_loop().run_in_executor(None, self.robots_parser.read)
         except Exception as e:
-            # [FIXED] Proper Logging
             logger.warning(f"Failed to fetch robots.txt: {e}. Proceeding without restrictions.")
             self.robots_parser = None
 
@@ -181,7 +178,7 @@ class ScraperEngine:
                 logger.exception(f"Worker crashed on URL: {e}")
                 self.shutdown_requested = True  # Signal shutdown
                 raise  # Or re-raise after cleanup
-            
+
     async def _process_url(self, url: str):
         if not self._is_allowed(url):
             if self.stats_callback: self.stats_callback(StatsEvent("blocked"))
@@ -200,10 +197,8 @@ class ScraperEngine:
                     raise Exception("Empty Content")
             except Exception as e:
                 logger.error(f"Failed {url}: {e}")
-                
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, url)
-                
                 self.failed_urls.append(url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
 
@@ -215,7 +210,6 @@ class ScraperEngine:
 
         while pages < max_pages and current_url and not self.shutdown_requested:
             if not self._is_allowed(current_url): break
-            
             logger.info(f"📄 Page {pages + 1}: {current_url}")
             await self.checkpoint.mark_in_progress(current_url)
             
@@ -249,7 +243,6 @@ class ScraperEngine:
 
     async def _process_content(self, content: str, url: str = "", fields: Optional[List[DataField]] = None) -> Tuple[Dict[str, Any], Any]:
         current_fields = fields or self.config.fields
-        
         if self.config.response_type == "json":
              resolver = JsonResolver(content)
         else:
@@ -258,11 +251,9 @@ class ScraperEngine:
         data = {}
         for field in current_fields:
             extracted_value = resolver.resolve_field(field)
-            
             if field.follow_url and extracted_value and field.nested_fields:
                 urls_to_follow = extracted_value if isinstance(extracted_value, list) else [extracted_value]
                 nested_results_list = []
-                
                 max_urls = self.config.max_nested_urls
                 urls_to_follow = urls_to_follow[:max_urls]
                 
@@ -271,7 +262,6 @@ class ScraperEngine:
                 
                 for relative_url in urls_to_follow:
                     full_child_url = urljoin(url, str(relative_url))
-                    
                     if self.config.response_type == "json" and not full_child_url.endswith(".json"):
                         parsed = urlparse(full_child_url)
                         path = parsed.path.rstrip('/')
@@ -282,34 +272,29 @@ class ScraperEngine:
                     
                     try:
                         await self.checkpoint.mark_in_progress(full_child_url)
-                        
                         async with self.rate_limiter:
                             child_content = await self._fetch_page(full_child_url)
-                            
+                        
                         if child_content:
                             child_data, _ = await self._process_content(
                                 child_content, 
                                 full_child_url, 
                                 fields=field.nested_fields
                             )
-                            
                             child_data["_source_url"] = full_child_url
                             child_data["_parent_url"] = url
-                            
                             nested_results_list.append(child_data)
                             await self.checkpoint.mark_done(full_child_url)
-                            
                             if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                         else:
                             pass
-                                
+
                     except Exception as e:
                         logger.warning(f"Failed to follow {full_child_url}: {e}")
 
                 data[field.name] = nested_results_list
             else:
                 data[field.name] = extracted_value
-
         return data, resolver
 
     async def _save_debug_snapshot(self, html: str, url: str):
@@ -328,7 +313,6 @@ class ScraperEngine:
 
     async def _merge_data(self, page_data: Dict[str, Any]):
         if not any(page_data.values()): return
-
         data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True).encode()).hexdigest()
         
         if data_hash in self.seen_hashes:
@@ -338,23 +322,20 @@ class ScraperEngine:
 
         self.seen_hashes.add(data_hash)
         self.recent_hashes.append(data_hash)
-
-        # [FIXED] Initialize variable outside lock (Issue #17)
-        batch_to_flush = []
-
+        
+        batch_to_flush: List[Dict[str, Any]] = []
         async with self.data_lock:
             self.pending_batch.append(page_data)
             if len(self.pending_batch) >= self.batch_size:
                 batch_to_flush = self.pending_batch.copy()
                 self.pending_batch = []
         
-        # Safe to check now
         if batch_to_flush:
             await self._flush_batch(batch_to_flush)
             if self.stats_callback:
                 self.stats_callback(StatsEvent("entries_added", count=len(batch_to_flush)))
 
-    async def _flush_batch(self, batch: List[Dict]):
+    async def _flush_batch(self, batch: List[Dict[str, Any]]):
         if self.output_callback and batch:
             await self.output_callback({"items": batch}) 
 
@@ -365,12 +346,11 @@ class ScraperEngine:
         if batch: await self._flush_batch(batch)
 
     async def ensure_active_token(self):
-        if not self.config.authentication:
-            return
+        if not self.config.authentication: return
+        if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)): return
 
-        if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
-            return
-
+        session_to_close = None
+        
         async with self._auth_lock:
             if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
                 return
@@ -385,14 +365,12 @@ class ScraperEngine:
                 if auth_config.type == "oauth_password":
                     client_id = auth_config.client_id or ""
                     client_secret = auth_config.client_secret or ""
-                    
                     payload = {
                         "grant_type": "password",
                         "username": auth_config.username or "",
                         "password": auth_config.password or "",
                         "scope": auth_config.scope or "*"
                     }
-
                     current_proxy = self._get_next_proxy()
                     proxies = {"http": current_proxy, "https": current_proxy} if current_proxy else None
 
@@ -421,6 +399,10 @@ class ScraperEngine:
                 if session_to_close:
                     await session_to_close.close()
                 raise e
+        
+        # Cleanup outside lock
+        if session_to_close:
+            await session_to_close.close()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
     async def _fetch_page(self, url: str) -> str:
@@ -429,7 +411,6 @@ class ScraperEngine:
 
         headers = self.config.headers.copy() if self.config.headers else {}
         headers["User-Agent"] = self.ua_rotator.random
-        
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
 
@@ -438,17 +419,16 @@ class ScraperEngine:
         if self.browser_manager:
             return await self.browser_manager.fetch_page(url, headers=headers)
         else:
-            if not self.session: return ""
+            # [FIX #3] Raise Error for Silent Failure
+            if not self.session: raise RuntimeError("Session not initialized")
             try:
                 proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
-                
                 response = await self.session.get(
                     url, 
                     timeout=self.config.request_timeout, 
                     proxies=proxies, 
                     headers=headers
                 )
-                
                 if response.status_code == 200:
                     return response.text
                 elif response.status_code in [403, 429, 401]:

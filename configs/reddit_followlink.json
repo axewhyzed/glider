@@ -1,0 +1,34 @@
+{
+  "name": "reddit_discord_safe",
+  "base_url": "https://www.reddit.com",
+  "mode": "list",
+  "rate_limit": 5,
+  "response_type": "json",
+  "start_urls": [
+    "https://www.reddit.com/r/DiscordAdsKingdom/new.json",
+    "https://www.reddit.com/r/DiscordServerPromos/new.json"
+  ],
+  "headers": {
+    "User-Agent": "GliderBot/1.0 (Research)"
+  },
+  "fields": [
+    {
+      "name": "thread_link",
+      "selectors": [{"type": "json", "value": "data.children[*].data.permalink"}],
+      "is_list": true,
+      "follow_url": true,
+      "nested_fields": [
+        {
+          "name": "discord_invites",
+          "selectors": [
+            {
+              "type": "regex", 
+              "value": "https?:\\/\\/(?:www\\.)?(?:discord\\.gg|discord\\.com\\/invite)\\/[a-zA-Z0-9]+"
+            }
+          ],
+          "is_list": true
+        }
+      ]
+    }
+  ]
+}

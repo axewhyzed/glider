@@ -12,7 +12,8 @@ class StatsEvent:
 class SelectorType(str, Enum):
     CSS = "css"
     XPATH = "xpath"
-    JSON = "json"  # <--- NEW
+    JSON = "json"
+    REGEX = "regex" # <--- NEW: Selects from raw content
 
 class TransformerType(str, Enum):
     STRIP = "strip"
@@ -37,7 +38,7 @@ class InteractionType(str, Enum):
 class Transformer(BaseModel):
     name: TransformerType
     args: Optional[List[Any]] = []
-
+    
     @model_validator(mode='before')
     @classmethod
     def parse_shorthand(cls, data: Any) -> Any:
@@ -71,6 +72,10 @@ class DataField(BaseModel):
     transformers: List[Transformer] = []
     children: Optional[List['DataField']] = None
     
+    # --- NEW: Nested Scraping Logic ---
+    follow_url: bool = False
+    nested_fields: Optional[List['DataField']] = None 
+    
     @model_validator(mode='before')
     @classmethod
     def normalize_selectors(cls, data: Any) -> Any:
@@ -100,7 +105,6 @@ class Pagination(BaseModel):
         if v < 1: raise ValueError('max_pages must be at least 1')
         return v
 
-# --- NEW AUTH CONFIG ---
 class AuthConfig(BaseModel):
     type: Literal["oauth_password", "bearer"] = "oauth_password"
     token_url: Optional[HttpUrl] = None
@@ -116,8 +120,7 @@ class ScraperConfig(BaseModel):
     mode: ScrapeMode = ScrapeMode.PAGINATION
     start_urls: Optional[List[HttpUrl]] = []
     
-    # Engine Settings
-    response_type: Literal["html", "json"] = "html"  # <--- NEW
+    response_type: Literal["html", "json"] = "html"
     use_playwright: bool = False
     debug_mode: bool = False
     concurrency: int = 2
@@ -128,8 +131,6 @@ class ScraperConfig(BaseModel):
     wait_for_selector: Optional[str] = None
     interactions: Optional[List[Interaction]] = []
     proxies: Optional[List[str]] = None
-    
-    # New Header & Auth Fields
     headers: Optional[Dict[str, str]] = None
     authentication: Optional[AuthConfig] = None
     

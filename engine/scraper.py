@@ -169,6 +169,8 @@ class ScraperEngine:
             # [FIXED] Log Worker Exceptions
             except Exception as e:
                 logger.exception(f"Worker crashed on URL: {e}")
+                self.shutdown_requested = True  # Signal shutdown
+                raise  # Or re-raise after cleanup
 
     async def _process_url(self, url: str):
         if not self._is_allowed(url):
@@ -399,10 +401,11 @@ class ScraperEngine:
                         
             except Exception as e:
                 logger.error(f"Auth Error: {e}")
-                # [FIXED] Cleanup Session on Auth Failure
-                if self.session:
-                    await self.session.close()
+                # Close session outside lock to prevent race conditions
+                session_to_close = self.session
                 self.session = None
+                if session_to_close:
+                    await session_to_close.close()
                 raise e
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))

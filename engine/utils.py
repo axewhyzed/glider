@@ -5,6 +5,20 @@ from pathlib import Path
 from typing import Any, List, Union, Dict
 from engine.schemas import TransformerType
 
+def flatten_dict(d: Dict[str, Any], parent_key: str = '', sep: str = '_') -> Dict[str, Any]:
+    """
+    Flattens a nested dictionary into a single level with a separator.
+    Used for CSV export of nested data structures.
+    """
+    items: List[tuple] = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
 def apply_transformers(value: Any, transformers: List[Any]) -> Any:
     if value is None:
         return None
@@ -18,9 +32,17 @@ def apply_transformers(value: Any, transformers: List[Any]) -> Any:
                 if isinstance(value, str):
                     value = value.strip()
             elif name == TransformerType.TO_FLOAT:
+                # Basic cleaning for currency symbols and commas
+                if isinstance(value, str):
+                    value = value.replace('$', '').replace(',', '').strip()
                 value = float(value)
             elif name == TransformerType.TO_INT:
-                value = int(float(value)) # Handle "12.0" -> 12
+                if isinstance(value, str):
+                    # Extract digits only or handle float strings
+                    digits = "".join(re.findall(r'\d+', value))
+                    value = int(digits) if digits else 0
+                else:
+                    value = int(float(value))
             elif name == TransformerType.REGEX:
                 if isinstance(value, str) and args:
                     pattern = args[0]
@@ -33,9 +55,7 @@ def apply_transformers(value: Any, transformers: List[Any]) -> Any:
                 if isinstance(value, str) and len(args) >= 2:
                     value = value.replace(args[0], args[1])
         except Exception:
-            # If transformation fails, keep original value or None? 
-            # Usually better to return None or log error. 
-            # For resilience, we keep the value but maybe it's wrong type.
+            # For resilience, keep the value if transformation fails
             pass
             
     return value
@@ -45,13 +65,11 @@ def load_config(path: str) -> Dict[str, Any]:
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Expand ${VAR} or $VAR
-    # Matches ${VAR} or $VAR
     pattern = re.compile(r'\$\{([^}]+)\}|\$([a-zA-Z0-9_]+)')
     
     def replace_env(match):
         var_name = match.group(1) or match.group(2)
-        return os.environ.get(var_name, match.group(0)) # Return original if not found
+        return os.environ.get(var_name, match.group(0))
         
     expanded_content = pattern.sub(replace_env, content)
     return json.loads(expanded_content)

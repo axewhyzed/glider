@@ -142,7 +142,13 @@ class ScraperConfig(BaseModel):
     
     respect_robots_txt: bool = False
     use_checkpointing: bool = False
-    
+
+    # When response_type is "json" and follow_url is used, set this to True to
+    # automatically append ".json" to child URLs that don't already end with it.
+    # This is a Reddit-specific convention (e.g. /r/python/comments/xyz/ → .json).
+    # Leave False for all other JSON APIs to avoid mangling URLs.
+    append_json_suffix: bool = False
+
     fields: List[DataField]
     pagination: Optional[Pagination] = None
     

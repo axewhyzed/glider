@@ -4,6 +4,7 @@
   "mode": "list",
   "rate_limit": 5,
   "response_type": "json",
+  "append_json_suffix": true,
   "start_urls": [
     "https://www.reddit.com/r/DiscordAdsKingdom/new.json",
     "https://www.reddit.com/r/DiscordServerPromos/new.json"
@@ -22,7 +23,7 @@
           "name": "discord_invites",
           "selectors": [
             {
-              "type": "regex", 
+              "type": "regex",
               "value": "https?:\\/\\/(?:www\\.)?(?:discord\\.gg|discord\\.com\\/invite)\\/[a-zA-Z0-9]+"
             }
           ],

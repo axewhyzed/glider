@@ -51,7 +51,7 @@ class CheckpointManager:
         self._cache.add(url)
         try:
             await self._db_conn.execute(
-                "UPDATE visited SET status = 'done' WHERE url = ?",
+                "INSERT OR REPLACE INTO visited (url, status) VALUES (?, 'done')",
                 (url,)
             )
             await self._db_conn.commit()

@@ -1,9 +1,21 @@
 import json
 import csv
 from pathlib import Path
-from typing import Set
+from typing import Any, Dict, List, Optional, Set
 from loguru import logger
 from engine.utils import flatten_dict
+
+
+def _stringify_lists(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert any list values in a flat dict to pipe-separated strings for CSV."""
+    result = {}
+    for k, v in d.items():
+        if isinstance(v, list):
+            result[k] = " | ".join(str(item) for item in v)
+        else:
+            result[k] = v
+    return result
+
 
 def convert_to_json(input_file: Path, output_file: Path):
     """
@@ -36,11 +48,15 @@ def convert_to_json(input_file: Path, output_file: Path):
     except Exception as e:
         logger.error(f"JSON Export failed: {e}")
 
-def convert_to_csv(input_file: Path, output_file: Path):
+def convert_to_csv(input_file: Path, output_file: Path, field_order: Optional[List[str]] = None):
     """
     Two-pass CSV conversion to handle dynamic headers without memory spikes.
     Pass 1: Scan for keys.
     Pass 2: Write rows.
+
+    Args:
+        field_order: Optional list of field names to use as the preferred column order.
+                     Any discovered fields not in this list are appended alphabetically.
     """
     logger.info(f"📂 Converting {input_file} to CSV...")
     headers: Set[str] = set()
@@ -58,6 +74,8 @@ def convert_to_csv(input_file: Path, output_file: Path):
                             if isinstance(item, dict):
                                 flat = flatten_dict(item)
                                 headers.update(flat.keys())
+                            else:
+                                logger.debug(f"CSV: skipping non-dict item of type {type(item).__name__}")
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
@@ -68,14 +86,20 @@ def convert_to_csv(input_file: Path, output_file: Path):
         logger.warning("No headers found for CSV.")
         return
 
-    fieldnames = sorted(list(headers))
+    # Respect preferred field order; append any extra fields alphabetically
+    if field_order:
+        ordered = [f for f in field_order if f in headers]
+        remaining = sorted(headers - set(ordered))
+        fieldnames = ordered + remaining
+    else:
+        fieldnames = sorted(list(headers))
 
     # Pass 2: Write Data
     try:
         with open(input_file, 'r', encoding='utf-8') as fin, \
              open(output_file, 'w', newline='', encoding='utf-8') as fout:
             
-            writer = csv.DictWriter(fout, fieldnames=fieldnames)
+            writer = csv.DictWriter(fout, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             
             for line in fin:
@@ -87,7 +111,8 @@ def convert_to_csv(input_file: Path, output_file: Path):
                         for item in items:
                             if isinstance(item, dict):
                                 flat = flatten_dict(item)
-                                writer.writerow(flat)
+                                row = _stringify_lists(flat)
+                                writer.writerow(row)
                 except json.JSONDecodeError:
                     continue
         logger.success(f"✅ CSV saved to {output_file}")

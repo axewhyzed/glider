@@ -126,8 +126,7 @@ def scrape(config_path: str):
         return
 
     try:
-        with open(path, 'r') as f:
-            config = ScraperConfig(**load_config(config_path))
+        config = ScraperConfig(**load_config(config_path))
     except Exception as e:
         console.print(f"[red]Invalid Config: {e}[/red]")
         return

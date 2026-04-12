@@ -213,9 +213,9 @@ class ScraperEngine:
         Compute the next page URL from the current URL and the next_value token.
 
         For HTML pagination the next_value is typically a relative href that should
-        be resolved with urljoin.  For JSON API pagination it is often a cursor/after
-        token that must be appended as a query parameter rather than used as a path
-        segment (e.g. Reddit's `data.after` → `?after=t3_abc123`).
+        be resolved with urljoin.  For JSON API pagination it is often a cursor token
+        that must be appended as a query parameter (configurable via
+        ``pagination.query_param``, default ``"after"``).
         """
         if not next_value:
             return None
@@ -227,10 +227,15 @@ class ScraperEngine:
             return urljoin(current_url, next_value)
 
         if is_json:
-            # Treat as a query-parameter cursor (e.g. Reddit's `after` token)
+            # Treat as a query-parameter cursor token
+            param_name = (
+                self.config.pagination.query_param
+                if self.config.pagination
+                else "after"
+            )
             parsed = urlparse(current_url)
             params = parse_qs(parsed.query, keep_blank_values=True)
-            params["after"] = [next_value]
+            params[param_name] = [next_value]
             new_query = urlencode(params, doseq=True)
             return urlunparse(parsed._replace(query=new_query))
 

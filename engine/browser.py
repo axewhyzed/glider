@@ -72,12 +72,19 @@ class BrowserManager:
                 with open(self.config.cookies_file, 'r') as f:
                     raw_cookies = json.load(f)
                 if isinstance(raw_cookies, dict):
-                    # Convert simple key/value dict to Playwright cookie format
-                    pw_cookies = [
-                        {"name": str(k), "value": str(v), "url": str(self.config.base_url or "about:blank")}
-                        for k, v in raw_cookies.items()
-                        if v is not None and isinstance(v, (str, int, float, bool))
-                    ]
+                    # Convert simple key/value dict to Playwright cookie format.
+                    # Playwright requires either `url` or `domain`+`path`; use base_url
+                    # when available.  If base_url is not set, omit `url` and let
+                    # Playwright infer domain from the first navigation.
+                    base_url_str = str(self.config.base_url) if self.config.base_url else None
+                    pw_cookies = []
+                    for k, v in raw_cookies.items():
+                        if v is None or not isinstance(v, (str, int, float, bool)):
+                            continue
+                        entry: Dict[str, Any] = {"name": str(k), "value": str(v)}
+                        if base_url_str:
+                            entry["url"] = base_url_str
+                        pw_cookies.append(entry)
                 elif isinstance(raw_cookies, list):
                     pw_cookies = raw_cookies  # Already in Playwright format
                 else:

@@ -75,7 +75,7 @@ def convert_to_csv(input_file: Path, output_file: Path, field_order: Optional[Li
                                 flat = flatten_dict(item)
                                 headers.update(flat.keys())
                             else:
-                                logger.debug(f"CSV: skipping non-dict item of type {type(item).__name__}")
+                                logger.warning(f"CSV: skipping non-dict item of type {type(item).__name__} — check your field configuration")
                 except json.JSONDecodeError:
                     continue
     except Exception as e:

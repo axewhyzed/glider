@@ -2,14 +2,14 @@
 
 **Glider** is a high-performance, configuration-driven web scraping framework designed for the modern web. It bridges the gap between simple Python scripts and enterprise-grade extraction tools.
 
-Built on **Python 3.9+**, it leverages **AsyncIO**, **Playwright**, and **Curl_CFFI** to provide a hybrid scraping engine that is fast, stealthy, and scalable — all driven by plain JSON configuration files, no coding required.
+Built on **Python 3.9+**, it leverages **AsyncIO**, **Playwright**, and **curl_cffi** to provide a hybrid scraping engine that is fast, stealthy, and scalable — all driven by plain JSON configuration files, no coding required.
 
 ---
 
 ## ✨ Key Features
 
 ### 🛡️ Stealth & Anti-Detection
-* **Hybrid Engine:** Choose between `curl_cffi` (speed + TLS fingerprint spoofing) or `Playwright` (full real-browser execution) per config.
+* **Hybrid Engine:** Choose between `curl_cffi` (speed + TLS fingerprint spoofing) or Playwright (full real-browser execution) per config.
 * **Browser Stealth:** Integrates `playwright-stealth` to mask automation signals (WebDriver flags, permissions, etc.).
 * **Identity Rotation:**
   * **TLS Fingerprints:** Rotates JA3 signatures (Chrome, Edge, Safari) to bypass Cloudflare and similar protections.

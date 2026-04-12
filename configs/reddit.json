@@ -1,14 +1,19 @@
 {
   "name": "reddit_api",
-  "base_url": "https://oauth.reddit.com",
+  "base_url": "https://oauth.reddit.com/r/python/hot",
+  "mode": "pagination",
   "response_type": "json",
+  "rate_limit": 1,
   "authentication": {
     "type": "oauth_password",
     "token_url": "https://www.reddit.com/api/v1/access_token",
-    "client_id": "YOUR_REDDIT_APP_ID",
-    "client_secret": "YOUR_REDDIT_APP_SECRET",
-    "username": "YOUR_REDDIT_USERNAME",
-    "password": "YOUR_REDDIT_PASSWORD"
+    "client_id": "${REDDIT_CLIENT_ID}",
+    "client_secret": "${REDDIT_CLIENT_SECRET}",
+    "username": "${REDDIT_USERNAME}",
+    "password": "${REDDIT_PASSWORD}"
+  },
+  "headers": {
+    "User-Agent": "GliderBot/1.0"
   },
   "fields": [
     {
@@ -16,11 +21,16 @@
       "selectors": [{"type": "json", "value": "data.children[*].data"}],
       "is_list": true,
       "children": [
-        {"name": "title", "selectors": [{"type": "json", "value": "title"}]},
-        {"name": "author", "selectors": [{"type": "json", "value": "author"}]},
-        {"name": "score", "selectors": [{"type": "json", "value": "score"}]},
-        {"name": "url", "selectors": [{"type": "json", "value": "url"}]}
+        {"name": "title",     "selectors": [{"type": "json", "value": "title"}]},
+        {"name": "author",    "selectors": [{"type": "json", "value": "author"}]},
+        {"name": "score",     "selectors": [{"type": "json", "value": "score"}]},
+        {"name": "permalink", "selectors": [{"type": "json", "value": "permalink"}]}
       ]
     }
-  ]
+  ],
+  "pagination": {
+    "selector": {"type": "json", "value": "data.after"},
+    "max_pages": 5,
+    "query_param": "after"
+  }
 }

@@ -65,7 +65,7 @@ def generate_dashboard(stats: ScrapeStats, config_name: str) -> Table:
     table.add_row("❌ Failed Pages", f"[red]{stats.failed}[/red]")
     table.add_row("⏭️  Skipped", str(stats.skipped))
     table.add_row("🚫 Blocked", f"[yellow]{stats.blocked}[/yellow]")
-    table.add_row("📊 Total Entries", f"[bold green]{stats.entries_extracted}[/bold green]")
+    table.add_row("📊 Total Records", f"[bold green]{stats.entries_extracted}[/bold green]")
     table.add_row("⚡ Avg Entries/sec", f"{stats.avg_rps:.2f}")
     return table
 
@@ -157,6 +157,8 @@ def scrape(config_path: str):
             field_order = [f.name for f in config.fields]
             convert_to_json(temp_file, Path("data") / "interrupted_data.json")
             convert_to_csv(temp_file, Path("data") / "interrupted_data.csv", field_order=field_order)
+            temp_file.unlink()  # Clean up the raw stream file
+            console.print("[green]💾 Partial data saved to data/interrupted_data.*[/green]")
     except Exception as e:
         logger.exception(f"Fatal: {e}")
         console.print("[red]Fatal Error. Check logs.[/red]")

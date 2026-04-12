@@ -106,13 +106,16 @@ Glider is controlled entirely by JSON configuration files. Several ready-to-run 
 # Static HTML site — Books to Scrape
 python main.py configs/books_example.json
 
+# Static HTML site — Hacker News
+python main.py configs/hacker_news.json
+
 # JavaScript-rendered site — Quotes to Scrape (requires Playwright)
 python main.py configs/quotes_js.json
 
 # Public JSON API — Reddit (no auth required)
 python main.py configs/reddit_unauthenticated.json
 
-# Authenticated JSON API — Reddit OAuth
+# Authenticated JSON API — Reddit OAuth (set REDDIT_* env vars)
 python main.py configs/reddit.json
 
 # Nested link-following — Reddit Discord invites
@@ -164,6 +167,7 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `wait_for_selector` | string | `null` | CSS selector to wait for before capturing page content (Playwright only). |
 | `use_checkpointing` | bool | `false` | Persist visited-URL state to SQLite for crash recovery and resume. |
 | `respect_robots_txt` | bool | `false` | Fetch and obey `robots.txt` before scraping. |
+| `append_json_suffix` | bool | `false` | When `follow_url` is used with a JSON API, append `.json` to child URLs that don't already end with it. Reddit-specific; leave `false` for all other APIs. |
 | `max_nested_urls` | int 1–100 | `5` | Max child URLs followed per parent page when using `follow_url`. |
 | `fields` | list | **Required** | Data extraction field definitions (see below). |
 | `pagination` | object | `null` | Pagination configuration (see below). |
@@ -436,15 +440,17 @@ glider/
 ├── configs/                    # JSON configuration files (recipes)
 │   ├── books_example.json      # Static HTML pagination example
 │   ├── quotes_js.json          # Playwright JS-rendered example
-│   ├── reddit.json             # Reddit OAuth API example
+│   ├── reddit.json             # Reddit OAuth API example (uses env vars)
 │   ├── reddit_unauthenticated.json   # Public Reddit JSON API
-│   ├── reddit_followlink.json  # Nested link-following example
+│   ├── reddit_followlink.json  # Nested link-following example (append_json_suffix)
+│   ├── hacker_news.json        # Hacker News HTML pagination example
 │   └── attribute_extraction_example.json
 ├── data/                       # Output data, checkpoint DBs, bloom filters
 ├── docs/                       # Extended documentation
 │   ├── ATTRIBUTE_EXTRACTION.md
 │   ├── CONFIG_REFERENCE.md
 │   ├── EXAMPLES.md
+│   ├── KNOWN_ISSUES.md
 │   └── TRANSFORMERS.md
 ├── engine/                     # Core library
 │   ├── scraper.py              # Main async engine, OAuth handler, worker pool
@@ -456,10 +462,10 @@ glider/
 │   └── utils.py                # Transformer pipeline, config loader
 ├── logs/                       # Rotating execution logs (auto-created)
 ├── debug/                      # HTML snapshots of failed pages (auto-created)
-├── tests/                      # Pytest unit tests (26 tests)
+├── tests/                      # Pytest unit tests (36 tests)
 ├── main.py                     # CLI entry point & live dashboard
 ├── CHANGELOG.md                # Detailed version history
-├── UPGRADE_GUIDE.md            # Migration guide (v2.5 → v2.6)
+├── UPGRADE_GUIDE.md            # Migration guides (v2.5 → v2.6, v2.7 → v2.8)
 ├── pytest.ini                  # Test configuration
 └── requirements.txt            # Python dependencies
 ```
@@ -468,7 +474,29 @@ glider/
 
 ## 🆕 What's New
 
-### v2.7.1 — Critical Stability Patch (December 24, 2025)
+### v2.8.0 — Production Hardening (April 2026)
+
+#### 🔥 All Remaining Bugs Fixed
+* **JSON API pagination now works with shorthand selectors** (`"data.after"` shorthand no longer silently breaks pagination after page 1).
+* **Dashboard "Total Records" counts individual items** — a page containing 50 books now shows 50 records, not 1.
+* **`page_skipped` event now fires** when the Bloom filter deduplicates a page — the "Skipped" dashboard counter is now accurate.
+* **Playwright navigation respects `request_timeout`** — the hardcoded 30-second timeout is replaced by the config value.
+* **`wait_for_selector` timeout is now logged** as a warning instead of being silently swallowed.
+* **`interactions` without `use_playwright: true` now warns** at startup instead of silently ignoring the config.
+* **Interrupted scrapes clean up `temp_stream.jsonl`** after saving partial output.
+* **`follow_url` + JSON mode no longer appends `.json` by default** — use the new `append_json_suffix: true` field for Reddit-style APIs.
+
+#### 🆕 New Config Field
+* **`append_json_suffix: bool`** (default `false`) — opt-in `.json` suffix appending for Reddit-style follow_url. Previously this was hardcoded to always-on.
+
+#### 🗑️ Removed
+* `selectolax` removed from `requirements.txt` (it was listed but never used).
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the complete fix list.
+
+---
+
+### v2.7.1 — Critical Stability Patch (December 2025)
 
 #### 🔥 Critical Fixes
 * **Browser Memory Leak Fixed:** Playwright browser contexts now properly closed after each page scrape, preventing unbounded memory growth in long-running jobs.
@@ -503,11 +531,11 @@ glider/
 ### Running Tests
 
 ```bash
-# Run all 26 tests
+# Run all 36 tests
 python -m pytest tests/ -v
 ```
 
-Tests cover: config schema validation, transformer pipeline, HTML/XPath/CSS resolution, JSON resolution, checkpoint persistence, and scraper initialization.
+Tests cover: config schema validation, transformer pipeline, HTML/XPath/CSS resolution, JSON resolution, checkpoint persistence, scraper initialization, stats counting, and deduplication events.
 
 ### Adding Tests
 
@@ -531,9 +559,10 @@ See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) for a full list. Key limitati
 * **GET only:** Only HTTP GET requests are supported. POST-based pagination or form submission is not implemented.
 * **Pagination is sequential:** In `pagination` mode, pages are fetched one at a time regardless of the `concurrency` setting (which only affects `list` mode).
 * **`debug_mode` config field is reserved:** The field is accepted in configs but does not yet change any behaviour.
-* **`.json` URL rewriting for Reddit-style APIs:** When `response_type` is `"json"` and `follow_url` is used, the engine appends `.json` to child URLs that don't already end in `.json`. This is a Reddit-specific convention and may not be appropriate for other APIs.
+* **`append_json_suffix` is Reddit-specific:** Set `"append_json_suffix": true` only for Reddit-style APIs where child URLs need `.json` appended. Leave `false` for all other JSON APIs.
 * **Bloom filter capacity is not configurable via JSON config.** It is hardcoded at 100 000 items. To change it, edit `engine/scraper.py` directly (see [`UPGRADE_GUIDE.md`](UPGRADE_GUIDE.md)).
-* **Browser interactions are silently ignored if `use_playwright` is `false`.**
+* **Browser interactions are silently ignored if `use_playwright` is `false`** (a startup warning is logged).
+* **CSV nested list fields are pipe-joined strings.** Nested list data loses structure in CSV export; use the JSON output for list-valued fields.
 
 ---
 

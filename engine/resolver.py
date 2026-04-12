@@ -50,7 +50,7 @@ class JsonResolver:
             return self._resolve_children(field, results)
 
         if not results and field.selectors:
-            logger.warning(f"No data found for field '{field.name}': all selectors missed")
+            logger.warning(f"Field '{field.name}' returned no data — selector may be misconfigured or the data is absent from this response")
 
         if field.is_list:
             return [apply_transformers(v, field.transformers) for v in results]
@@ -123,7 +123,7 @@ class HtmlResolver:
                 if results: break
         
         if not results and field.selectors:
-            logger.warning(f"No data found for field '{field.name}': all selectors missed")
+            logger.warning(f"Field '{field.name}' returned no data — selector may be misconfigured or the data is absent from this page")
 
         if field.children and results:
              return self._resolve_children(field, results) 

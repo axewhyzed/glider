@@ -16,6 +16,7 @@ from rich.console import Console
 from engine.schemas import ScraperConfig, StatsEvent
 from engine.scraper import ScraperEngine
 from engine.export import convert_to_json, convert_to_csv
+from engine.utils import load_config
 
 app = typer.Typer()
 console = Console()
@@ -126,7 +127,7 @@ def scrape(config_path: str):
 
     try:
         with open(path, 'r') as f:
-            config = ScraperConfig(**json.load(f))
+            config = ScraperConfig(**load_config(config_path))
     except Exception as e:
         console.print(f"[red]Invalid Config: {e}[/red]")
         return
@@ -141,8 +142,9 @@ def scrape(config_path: str):
             base_filename = f"{config.name.replace(' ', '_').lower()}_{timestamp}"
             
             output_dir = Path("data")
+            field_order = [f.name for f in config.fields]
             convert_to_json(temp_file, output_dir / f"{base_filename}.json")
-            convert_to_csv(temp_file, output_dir / f"{base_filename}.csv")
+            convert_to_csv(temp_file, output_dir / f"{base_filename}.csv", field_order=field_order)
             
             temp_file.unlink() # Cleanup
             console.print("[green]✨ Done![/green]")
@@ -153,7 +155,9 @@ def scrape(config_path: str):
         console.print("[yellow]⚠️ Interrupted. Attempting to save captured data...[/yellow]")
         temp_file = Path("data") / "temp_stream.jsonl"
         if temp_file.exists():
-             convert_to_json(temp_file, Path("data") / "interrupted_data.json")
+            field_order = [f.name for f in config.fields]
+            convert_to_json(temp_file, Path("data") / "interrupted_data.json")
+            convert_to_csv(temp_file, Path("data") / "interrupted_data.csv", field_order=field_order)
     except Exception as e:
         logger.exception(f"Fatal: {e}")
         console.print("[red]Fatal Error. Check logs.[/red]")

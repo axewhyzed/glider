@@ -32,15 +32,23 @@ def apply_transformers(value: Any, transformers: List[Any]) -> Any:
                 if isinstance(value, str):
                     value = value.strip()
             elif name == TransformerType.TO_FLOAT:
-                # Basic cleaning for currency symbols and commas
                 if isinstance(value, str):
-                    value = value.replace('$', '').replace(',', '').strip()
-                value = float(value)
+                    if len(args) >= 2:
+                        # European format support: args = [thousands_sep, decimal_sep]
+                        # e.g. args=['.', ','] for "1.234,56" -> 1234.56
+                        thousands_sep, decimal_sep = str(args[0]), str(args[1])
+                        value = value.replace(thousands_sep, '').replace(decimal_sep, '.')
+                    # Strip common currency symbols, whitespace, and standard thousands commas
+                    value = re.sub(r'[^\d.\-]', '', value)
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    value = 0.0
             elif name == TransformerType.TO_INT:
                 if isinstance(value, str):
-                    # Extract digits only or handle float strings
-                    digits = "".join(re.findall(r'\d+', value))
-                    value = int(digits) if digits else 0
+                    # Extract the FIRST contiguous digit group to avoid ambiguity
+                    match = re.search(r'\d+', value)
+                    value = int(match.group(0)) if match else 0
                 else:
                     value = int(float(value))
             elif name == TransformerType.REGEX:
@@ -61,7 +69,10 @@ def apply_transformers(value: Any, transformers: List[Any]) -> Any:
     return value
 
 def load_config(path: str) -> Dict[str, Any]:
-    """Loads JSON config with Environment Variable expansion."""
+    """Loads JSON config with Environment Variable expansion.
+    
+    Supports ${VAR_NAME} and $VAR_NAME syntax in config values.
+    """
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     

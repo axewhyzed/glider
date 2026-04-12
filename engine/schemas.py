@@ -126,8 +126,8 @@ class ScraperConfig(BaseModel):
     concurrency: int = 2
     rate_limit: int = 5
     request_timeout: int = 15
-    min_delay: int = 1
-    max_delay: int = 3
+    min_delay: float = 1
+    max_delay: float = 3
     
     # Nested Scraping Limits
     max_nested_urls: int = Field(default=5, ge=1, le=100)
@@ -150,5 +150,13 @@ class ScraperConfig(BaseModel):
     def check_positive(cls, v):
         if v < 1: raise ValueError('Must be positive integer')
         return v
+
+    @model_validator(mode='after')
+    def check_mode_requirements(self) -> 'ScraperConfig':
+        if self.mode == ScrapeMode.PAGINATION and not self.base_url:
+            raise ValueError("'base_url' is required when mode is 'pagination'")
+        if self.mode == ScrapeMode.LIST and not self.start_urls:
+            raise ValueError("'start_urls' must be a non-empty list when mode is 'list'")
+        return self
 
 DataField.model_rebuild()

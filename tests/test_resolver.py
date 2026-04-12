@@ -91,3 +91,62 @@ def test_json_get_attribute_missing_path_returns_none():
     resolver = JsonResolver(JSON_API_CONTENT)
     sel = Selector(type=SelectorType.JSON, value="data.nonexistent")
     assert resolver.get_attribute(sel, "href") is None
+
+
+# --- JsonResolver multi-selector fallback tests ---
+
+MULTI_SELECTOR_JSON = '{"v1": {"title": "Hello"}, "v2": {"name": "World"}}'
+
+
+def test_json_first_selector_wins_when_it_matches():
+    """First selector returns data; second selector must not be applied."""
+    resolver = JsonResolver(MULTI_SELECTOR_JSON)
+    field = DataField(
+        name="title",
+        selectors=[
+            Selector(type=SelectorType.JSON, value="v1.title"),
+            Selector(type=SelectorType.JSON, value="v2.name"),
+        ],
+    )
+    assert resolver.resolve_field(field) == "Hello"
+
+
+def test_json_fallback_to_second_selector_when_first_misses():
+    """First selector returns nothing; second selector should be tried."""
+    resolver = JsonResolver(MULTI_SELECTOR_JSON)
+    field = DataField(
+        name="title",
+        selectors=[
+            Selector(type=SelectorType.JSON, value="v1.nonexistent"),
+            Selector(type=SelectorType.JSON, value="v2.name"),
+        ],
+    )
+    assert resolver.resolve_field(field) == "World"
+
+
+def test_json_regex_first_selector_wins_when_it_matches():
+    """First REGEX selector returns data; second selector must not be applied."""
+    resolver = JsonResolver(MULTI_SELECTOR_JSON)
+    field = DataField(
+        name="greeting",
+        selectors=[
+            Selector(type=SelectorType.REGEX, value=r'"title":\s*"([^"]+)"'),
+            Selector(type=SelectorType.REGEX, value=r'"name":\s*"([^"]+)"'),
+        ],
+    )
+    result = resolver.resolve_field(field)
+    assert result == "Hello"
+
+
+def test_json_regex_fallback_to_second_selector_when_first_misses():
+    """First REGEX selector returns nothing; second should be tried."""
+    resolver = JsonResolver(MULTI_SELECTOR_JSON)
+    field = DataField(
+        name="greeting",
+        selectors=[
+            Selector(type=SelectorType.REGEX, value=r'"nomatch":\s*"([^"]+)"'),
+            Selector(type=SelectorType.REGEX, value=r'"name":\s*"([^"]+)"'),
+        ],
+    )
+    result = resolver.resolve_field(field)
+    assert result == "World"

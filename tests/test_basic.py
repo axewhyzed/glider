@@ -29,7 +29,6 @@ def test_proxies_list_validation():
     }
     config = ScraperConfig(**config_data)
     
-    # FIX: Assert not None to satisfy Pylance "Optional" check
     assert config.proxies is not None
     assert len(config.proxies) == 2
     assert "socks5" in config.proxies[1]
@@ -50,7 +49,6 @@ def test_interactions_schema():
     }
     config = ScraperConfig(**config_data)
     
-    # FIX: Assert not None to satisfy Pylance
     assert config.interactions is not None
     assert len(config.interactions) == 4
     assert config.interactions[0].type == InteractionType.FILL
@@ -69,3 +67,44 @@ def test_invalid_interaction_type():
     }
     with pytest.raises(ValidationError):
         ScraperConfig(**config_data)
+
+def test_pagination_mode_requires_base_url():
+    """Pagination mode without base_url should raise a validation error."""
+    with pytest.raises(ValidationError):
+        ScraperConfig(**{
+            "name": "NoBASE",
+            "mode": "pagination",
+            "fields": []
+        })
+
+def test_list_mode_requires_start_urls():
+    """List mode without start_urls should raise a validation error."""
+    with pytest.raises(ValidationError):
+        ScraperConfig(**{
+            "name": "NoURLs",
+            "mode": "list",
+            "start_urls": [],
+            "fields": []
+        })
+
+def test_list_mode_valid():
+    """List mode with start_urls should be valid."""
+    config = ScraperConfig(**{
+        "name": "ListMode",
+        "mode": "list",
+        "start_urls": ["http://example.com/page1"],
+        "fields": []
+    })
+    assert config.mode.value == "list"
+
+def test_float_delays():
+    """min_delay and max_delay should accept float values."""
+    config = ScraperConfig(**{
+        "name": "FloatDelays",
+        "base_url": "http://example.com",
+        "min_delay": 0.5,
+        "max_delay": 1.5,
+        "fields": []
+    })
+    assert config.min_delay == 0.5
+    assert config.max_delay == 1.5

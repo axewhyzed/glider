@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Optional, Any, Callable, Awaitable, Dict, List
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 from loguru import logger
@@ -7,14 +8,17 @@ from fake_useragent import UserAgent
 
 from engine.schemas import ScraperConfig, InteractionType
 
-# Optional stealth
+# Optional stealth — support both old module-style and new direct-function-style imports
 stealth_async: Optional[Callable[[Page], Awaitable[None]]] = None
 try:
-    from playwright_stealth import stealth_async # type: ignore
+    from playwright_stealth import stealth_async as _stealth_import  # type: ignore
+    # Newer versions export the function directly; older versions wrapped it in a module object
+    if callable(_stealth_import):
+        stealth_async = _stealth_import
+    elif hasattr(_stealth_import, 'stealth_async') and callable(_stealth_import.stealth_async):
+        stealth_async = _stealth_import.stealth_async  # type: ignore
 except ImportError:
     pass
-if stealth_async and hasattr(stealth_async, 'stealth_async'):
-    stealth_async = stealth_async.stealth_async # type: ignore
 
 class BrowserManager:
     """
@@ -49,7 +53,6 @@ class BrowserManager:
     async def _create_context(self):
         if self.context:
             try:
-                # [FIXED] Error Handling to prevent Memory Leak (Issue #18)
                 await self.context.close()
             except Exception as e:
                 logger.warning(f"Failed to close old context: {e}")
@@ -57,11 +60,46 @@ class BrowserManager:
         if not self.browser:
              raise RuntimeError("Browser not initialized")
 
-        self.context = await self.browser.new_context(
-            user_agent=self.ua_rotator.random,
-            viewport={"width": 1920, "height": 1080},
-            ignore_https_errors=True
-        )
+        context_options: Dict[str, Any] = {
+            "user_agent": self.ua_rotator.random,
+            "viewport": {"width": 1920, "height": 1080},
+            "ignore_https_errors": True,
+        }
+
+        # Inject cookies from cookie file into the Playwright context
+        if self.config.cookies_file:
+            try:
+                with open(self.config.cookies_file, 'r') as f:
+                    raw_cookies = json.load(f)
+                if isinstance(raw_cookies, dict):
+                    # Convert simple key/value dict to Playwright cookie format.
+                    # Playwright requires either `url` or `domain`+`path`; use base_url
+                    # when available.  If base_url is not set, omit `url` and let
+                    # Playwright infer domain from the first navigation.
+                    base_url_str = str(self.config.base_url) if self.config.base_url else None
+                    pw_cookies = []
+                    for k, v in raw_cookies.items():
+                        if v is None or not isinstance(v, (str, int, float, bool)):
+                            continue
+                        entry: Dict[str, Any] = {"name": str(k), "value": str(v)}
+                        if base_url_str:
+                            entry["url"] = base_url_str
+                        pw_cookies.append(entry)
+                elif isinstance(raw_cookies, list):
+                    pw_cookies = raw_cookies  # Already in Playwright format
+                else:
+                    pw_cookies = []
+
+                self.context = await self.browser.new_context(**context_options)
+                if pw_cookies:
+                    await self.context.add_cookies(pw_cookies)
+                    logger.info(f"🍪 Injected {len(pw_cookies)} cookies into Playwright context")
+            except Exception as e:
+                logger.error(f"❌ Failed to inject cookies into browser context: {e}")
+                self.context = await self.browser.new_context(**context_options)
+        else:
+            self.context = await self.browser.new_context(**context_options)
+
         self.request_count = 0
 
     async def close(self):
@@ -83,7 +121,7 @@ class BrowserManager:
 
         page = await self.context.new_page()
         try:
-            # 1. Apply Headers (for Auth)
+            # Apply Headers (for Auth)
             if headers:
                 await page.set_extra_http_headers(headers)
 
@@ -133,3 +171,7 @@ class BrowserManager:
             await page.fill(action.selector, action.value or "")
         elif action.type == InteractionType.PRESS and action.selector:
             await page.press(action.selector, action.value or "Enter")
+        elif action.type == InteractionType.HOVER and action.selector:
+            await page.hover(action.selector, timeout=5000)
+        elif action.type == InteractionType.KEY_PRESS and action.value:
+            await page.keyboard.press(action.value)

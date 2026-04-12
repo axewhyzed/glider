@@ -54,6 +54,14 @@ class BloomFilter:
             bit_offset = index % 8
             self.bit_array[byte_index] |= (1 << bit_offset)
         self.item_count += 1
+        if self.item_count % 10000 == 0:
+            fill_ratio = self.item_count / self.capacity
+            if fill_ratio > 0.8:
+                logger.warning(
+                    f"⚠️ Bloom filter is {fill_ratio:.0%} full "
+                    f"({self.item_count}/{self.capacity}). "
+                    "Consider increasing 'capacity' to maintain accuracy."
+                )
     
     def __contains__(self, item: Any) -> bool:
         item_str = str(item)
@@ -66,26 +74,39 @@ class BloomFilter:
         return True
     
     def save(self, path: Path):
-        """Persist bit array to disk."""
+        """Persist bit array and item count to disk."""
         try:
             with open(path, 'wb') as f:
+                # Write item_count as 8-byte little-endian prefix, then bit array
+                f.write(self.item_count.to_bytes(8, byteorder='little'))
                 f.write(self.bit_array)
         except Exception as e:
             logger.warning(f"Failed to save bloom filter: {e}")
             
     def load(self, path: Path):
-        """Load bit array from disk if size matches."""
+        """Load bit array and item count from disk if size matches."""
         if not path.exists():
             return
         
         try:
+            expected_size = 8 + len(self.bit_array)  # 8-byte count header + bit array
             file_size = os.path.getsize(path)
-            if file_size != len(self.bit_array):
-                logger.warning(f"⚠️ Bloom Filter size mismatch. Expected {len(self.bit_array)}, got {file_size}. Starting fresh.")
+
+            # Support legacy files (no count header) by checking without the header too
+            legacy_size = len(self.bit_array)
+            if file_size == legacy_size:
+                with open(path, 'rb') as f:
+                    self.bit_array = bytearray(f.read())
+                    logger.info(f"🌸 Loaded Bloom Filter (legacy format, {len(self.bit_array)} bytes)")
+                return
+
+            if file_size != expected_size:
+                logger.warning(f"⚠️ Bloom Filter size mismatch. Starting fresh.")
                 return
                 
             with open(path, 'rb') as f:
+                self.item_count = int.from_bytes(f.read(8), byteorder='little')
                 self.bit_array = bytearray(f.read())
-                logger.info(f"🌸 Loaded Bloom Filter ({len(self.bit_array)} bytes)")
+                logger.info(f"🌸 Loaded Bloom Filter ({len(self.bit_array)} bytes, ~{self.item_count} items)")
         except Exception as e:
             logger.error(f"Failed to load bloom filter: {e}")

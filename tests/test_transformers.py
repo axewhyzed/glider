@@ -10,17 +10,27 @@ def test_strip_transformer():
 def test_to_float_standard():
     t = Transformer(name=TransformerType.TO_FLOAT)
     assert apply_transformers(" $1,234.56 ", [t]) == 1234.56
+
+def test_to_float_invalid_returns_zero():
+    t = Transformer(name=TransformerType.TO_FLOAT)
     assert apply_transformers("invalid", [t]) == 0.0
 
 def test_to_float_european():
-    # Test European format: 1.234,56 (dot thousands, comma decimal)
-    t = Transformer(name=TransformerType.TO_FLOAT, args=[",", "."])
+    # European format: "€1.234,56" -> 1234.56
+    # args[0] = thousands separator ('.'), args[1] = decimal separator (',')
+    t = Transformer(name=TransformerType.TO_FLOAT, args=[".", ","])
     assert apply_transformers("€1.234,56", [t]) == 1234.56
 
 def test_to_int():
     t = Transformer(name=TransformerType.TO_INT)
+    # Extracts FIRST digit group only
     assert apply_transformers("Order #12345", [t]) == 12345
     assert apply_transformers("No digits", [t]) == 0
+
+def test_to_int_first_group_only():
+    # Ambiguous multi-group input: should return the FIRST group, not concatenation
+    t = Transformer(name=TransformerType.TO_INT)
+    assert apply_transformers("12 items, 34 available", [t]) == 12
 
 def test_regex_extraction():
     # Extract order ID

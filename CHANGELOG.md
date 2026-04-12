@@ -1,5 +1,137 @@
 # Changelog
 
+## v2.8.0 — Production Hardening (April 2026)
+
+### 🔥 Bug Fixes
+
+#### 1. **JSON API Pagination Broken for Shorthand Selectors** (HIGH)
+
+**File:** `engine/resolver.py`  
+Pagination for JSON APIs silently stopped after the first page when the `pagination.selector` was specified as a shorthand string (e.g. `"data.after"`).  The schema normalises shorthand strings to `SelectorType.CSS`, but `JsonResolver.get_attribute` only resolved JSONPath when the type was explicitly `SelectorType.JSON`.  Fixed by removing the type guard — JSONPath is always attempted in JSON responses regardless of the selector type label.
+
+---
+
+#### 2. **Final Batch Not Counted in Dashboard Stats** (HIGH)
+
+**File:** `engine/scraper.py`  
+`_flush_remaining_batches` (called at end of every run) never fired `stats_callback(StatsEvent("entries_added", ...))`.  The dashboard always under-counted Total Records.  Fixed by adding the callback after the flush.
+
+---
+
+#### 3. **Pagination Failures Not Reported in Dashboard** (HIGH)
+
+**File:** `engine/scraper.py`  
+`_run_pagination_mode` exception handler only logged and broke without firing `stats_callback(StatsEvent("page_error"))`.  Dashboard always showed 0 failed pages in pagination mode.  Fixed.
+
+---
+
+#### 4. **`blocked` Stat Not Fired in Pagination Mode** (MEDIUM)
+
+**File:** `engine/scraper.py`  
+`_is_allowed` returning `False` in `_run_pagination_mode` silently broke the loop without firing the `blocked` stats event.  Fixed to match list-mode behaviour.
+
+---
+
+#### 5. **`_merge_data` Crashed on Non-JSON-Serializable Values** (MEDIUM)
+
+**File:** `engine/scraper.py`  
+`json.dumps(page_data)` had no `default` handler, raising `TypeError` on unusual extracted values.  Fixed with `default=str` and a guarding try/except.
+
+---
+
+#### 6. **`.json` URL Suffix Hardcoded to All JSON + `follow_url` Requests** (MEDIUM)
+
+**File:** `engine/scraper.py`  
+The engine unconditionally appended `.json` to child URLs when `response_type="json"` and `follow_url=true`.  This mangled URLs for any non-Reddit JSON API.  Fixed: the behaviour is now opt-in via the new `append_json_suffix: bool` config field (default `false`).
+
+---
+
+#### 7. **Mutable Default Argument in `_run_list_mode`** (LOW)
+
+**File:** `engine/scraper.py`  
+`_run_list_mode(incomplete_urls: List[str] = [])` used a mutable default argument — a Python anti-pattern that can cause subtle bugs if the default is ever mutated.  Changed to `Optional[List[str]] = None` with an explicit `or []` guard.
+
+---
+
+#### 8. **Dead Code in `HtmlResolver._select_elements`** (LOW)
+
+**File:** `engine/resolver.py`  
+An unreachable `return []` statement existed after the try/except block.  Removed.
+
+---
+
+#### 9. **Playwright Navigation Timeout Hardcoded** (LOW)
+
+**File:** `engine/browser.py`  
+`page.goto()` used a hardcoded 30 000 ms timeout instead of the `request_timeout` config field.  Fixed to use `config.request_timeout * 1000`.
+
+---
+
+#### 10. **`wait_for_selector` Timeout Silently Swallowed** (LOW)
+
+**File:** `engine/browser.py`  
+When `wait_for_selector` timed out, the exception was silently caught with `pass`.  A warning is now logged so operators can detect misconfigured selectors.
+
+---
+
+#### 11. **`interactions` Without Playwright Silently Ignored** (LOW)
+
+**File:** `engine/scraper.py`  
+Defining `interactions` in a config with `use_playwright: false` produced no feedback.  A warning is now logged at startup when this combination is detected.
+
+---
+
+#### 12. **`temp_stream.jsonl` Not Cleaned Up After Ctrl+C** (LOW)
+
+**File:** `main.py`  
+After a keyboard interrupt, the partial data was exported but the raw `temp_stream.jsonl` was left on disk.  It is now deleted after a successful interrupted export.
+
+---
+
+#### 13. **`page_skipped` Stats Event Never Fired** (LOW)
+
+**File:** `engine/scraper.py`  
+The `page_skipped` event type was defined in the schema and handled by the dashboard, but never emitted anywhere.  It is now fired each time the Bloom filter deduplicates an entry.
+
+---
+
+#### 14. **Dashboard "Total Entries" Counted Pages, Not Records** (LOW)
+
+**File:** `engine/scraper.py`  
+`entries_added` fired with `count=1` per page fetch.  For configs where a field contains a list (e.g. 50 books per page), the dashboard showed the page count rather than the record count.  Fixed: the count now sums list-field lengths, so each scraped item is counted individually.
+
+---
+
+### 🆕 New Features
+
+#### `append_json_suffix` Config Field
+
+New top-level `bool` field (`default: false`).  Set to `true` for Reddit-style APIs where child URLs returned by `follow_url` need `.json` appended to become valid JSON API endpoints.  This replaces the previous always-on behaviour.
+
+---
+
+### 🗑️ Removed
+
+* `selectolax` removed from `requirements.txt` — it was listed as a dependency but was never imported or used anywhere in the codebase.
+
+---
+
+### 🧪 Test Suite
+
+* Suite grows from 26 → 36 tests.
+* New tests cover: per-item record counting, `page_skipped` event, `append_json_suffix` schema field.
+
+---
+
+### 📄 Documentation
+
+* `KNOWN_ISSUES.md` — all resolved bugs removed; remaining limitations updated.
+* `CONFIG_REFERENCE.md` — new `append_json_suffix` field documented.
+* `UPGRADE_GUIDE.md` — v2.7 → v2.8 migration guide added.
+* `README.md` — test count, version, and `What's New` section updated.
+
+---
+
 ## v2.7.1 - Critical Stability Patch (December 24, 2025)
 
 ### 🔥 Critical Fixes

@@ -341,6 +341,8 @@ Use XPath when CSS selectors aren't expressive enough.
 }
 ```
 
+> The `in_stock` field targets `<meta>` microdata tags like `<meta itemprop="availability" content="InStock" />` and extracts the `content` attribute value (`"InStock"` or `"OutOfStock"`).
+
 ---
 
 ## 10. Regex Selectors — Extract Structured Data from Free Text

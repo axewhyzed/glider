@@ -71,14 +71,17 @@ class JsonResolver:
         return extracted_data[0] if extracted_data else None
 
     def get_attribute(self, selector_obj, attribute: str) -> Optional[str]:
-        if selector_obj.type == SelectorType.JSON:
-             try:
-                jsonpath_expr = parse(selector_obj.value)
-                matches = jsonpath_expr.find(self.data)
-                if matches:
-                    return str(matches[0].value)
-             except Exception:
-                 pass
+        # For JSON responses, always attempt JSONPath resolution regardless of the selector
+        # type label.  A shorthand string selector (e.g. "data.after") is normalised to
+        # SelectorType.CSS by the schema, so checking only for SelectorType.JSON would
+        # silently break JSON-API pagination when the shorthand syntax is used.
+        try:
+            jsonpath_expr = parse(selector_obj.value)
+            matches = jsonpath_expr.find(self.data)
+            if matches:
+                return str(matches[0].value)
+        except Exception:
+            pass
         return None
 
 class HtmlResolver:

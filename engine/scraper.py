@@ -249,7 +249,9 @@ class ScraperEngine:
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
 
         while pages < max_pages and current_url and not self.shutdown_requested:
-            if not self._is_allowed(current_url): break
+            if not self._is_allowed(current_url):
+                if self.stats_callback: self.stats_callback(StatsEvent("blocked"))
+                break
             logger.info(f"📄 Page {pages + 1}: {current_url}")
             await self.checkpoint.mark_in_progress(current_url)
             
@@ -283,6 +285,7 @@ class ScraperEngine:
                 logger.error(f"Page failed: {e}")
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, current_url)
+                if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
                 break
 
     async def _process_content(self, content: str, url: str = "", fields: Optional[List[DataField]] = None) -> Tuple[Dict[str, Any], Any]:
@@ -357,7 +360,11 @@ class ScraperEngine:
 
     async def _merge_data(self, page_data: Dict[str, Any]):
         if not any(page_data.values()): return
-        data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True).encode()).hexdigest()
+        try:
+            data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True, default=str).encode()).hexdigest()
+        except Exception as e:
+            logger.warning(f"Skipping un-hashable page data: {e}")
+            return
         
         # Bloom filter is the primary deduplication gate; the recent deque provides
         # fast short-circuit for back-to-back identical pages.
@@ -388,7 +395,10 @@ class ScraperEngine:
         async with self.data_lock:
             batch = self.pending_batch.copy()
             self.pending_batch = []
-        if batch: await self._flush_batch(batch)
+        if batch:
+            await self._flush_batch(batch)
+            if self.stats_callback:
+                self.stats_callback(StatsEvent("entries_added", count=len(batch)))
 
     async def ensure_active_token(self):
         if not self.config.authentication: return

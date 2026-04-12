@@ -99,6 +99,7 @@ class DataField(BaseModel):
 class Pagination(BaseModel):
     selector: Selector
     max_pages: int = 5
+    query_param: str = "after"
     @field_validator('max_pages')
     @classmethod
     def check_max_pages(cls, v):

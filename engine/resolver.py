@@ -49,6 +49,9 @@ class JsonResolver:
         if field.children and results:
             return self._resolve_children(field, results)
 
+        if not results and field.selectors:
+            logger.warning(f"No data found for field '{field.name}': all selectors missed")
+
         if field.is_list:
             return [apply_transformers(v, field.transformers) for v in results]
         
@@ -119,6 +122,9 @@ class HtmlResolver:
                         results.append(extracted_val)
                 if results: break
         
+        if not results and field.selectors:
+            logger.warning(f"No data found for field '{field.name}': all selectors missed")
+
         if field.children and results:
              return self._resolve_children(field, results) 
         

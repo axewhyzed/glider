@@ -134,7 +134,6 @@ class HtmlResolver:
                 return element.xpath(value)
         except Exception as e:
             logger.error(f"Selector Error ({type_}: {value}): {e}")
-            return []
         return []
 
     def _extract_value(self, element, field: DataField) -> Any:

@@ -80,7 +80,7 @@ async def test_flush_remaining_batches_fires_entries_added(tmp_path):
 
     engine.output_callback = capture
 
-    # Add fewer items than batch_size (10) so they stay in pending_batch
+    # Three flat records (no list values) → each counts as 1 item → total 3
     engine.pending_batch = [{"title": f"item{i}"} for i in range(3)]
 
     await engine._flush_remaining_batches()
@@ -88,6 +88,66 @@ async def test_flush_remaining_batches_fires_entries_added(tmp_path):
     entries_events = [e for e in events if e.event_type == "entries_added"]
     assert len(entries_events) == 1
     assert entries_events[0].count == 3
+
+
+@pytest.mark.asyncio
+async def test_entries_added_counts_list_items(tmp_path):
+    """Per-item counting: entries_added should sum list-field lengths, not page_data units."""
+    engine, events = _make_engine(tmp_path)
+
+    received = []
+
+    async def capture(data):
+        received.append(data)
+
+    engine.output_callback = capture
+    engine.batch_size = 1  # Flush immediately on each _merge_data call
+
+    # One page_data with a 'books' list of 5 items → entries_added count = 5
+    page_data = {"books": [{"title": f"Book {i}"} for i in range(5)]}
+    await engine._merge_data(page_data)
+
+    entries_events = [e for e in events if e.event_type == "entries_added"]
+    assert len(entries_events) == 1
+    assert entries_events[0].count == 5
+
+
+@pytest.mark.asyncio
+async def test_page_skipped_fires_on_duplicate(tmp_path):
+    """Deduplicated pages must fire the page_skipped stats event."""
+    engine, events = _make_engine(tmp_path)
+
+    received = []
+
+    async def capture(data):
+        received.append(data)
+
+    engine.output_callback = capture
+    engine.batch_size = 1
+
+    page_data = {"title": "duplicate page", "price": 9.99}
+    await engine._merge_data(page_data)  # First time → accepted
+    await engine._merge_data(page_data)  # Second time → duplicate
+
+    skipped = [e for e in events if e.event_type == "page_skipped"]
+    assert len(skipped) == 1
+
+
+def test_append_json_suffix_defaults_to_false():
+    """append_json_suffix must default to False so non-Reddit JSON APIs are unaffected."""
+    config = ScraperConfig(**{"name": "t", "base_url": "http://x.com", "fields": []})
+    assert config.append_json_suffix is False
+
+
+def test_append_json_suffix_accepted_in_config():
+    """append_json_suffix can be set to True in config."""
+    config = ScraperConfig(**{
+        "name": "t",
+        "base_url": "http://x.com",
+        "append_json_suffix": True,
+        "fields": []
+    })
+    assert config.append_json_suffix is True
 
 
 @pytest.mark.asyncio

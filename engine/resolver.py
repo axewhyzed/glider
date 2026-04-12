@@ -9,7 +9,8 @@ from engine.utils import apply_transformers
 
 class JsonResolver:
     """
-    Parses JSON content and resolves DataFields using JSONPath.
+    Parses JSON content and resolves DataFields using JSONPath or Regex.
+    Selectors are tried in order; the first one that returns results is used.
     """
     def __init__(self, content: str):
         self.raw_content = content # <--- Keep raw content for Regex
@@ -33,15 +34,18 @@ class JsonResolver:
                         if m not in seen:
                             seen.add(m)
                             results.append(m)
+                    if results: break
                 except Exception as e:
                     logger.warning(f"Regex Error ({selector.value}): {e}")
-            
+                continue
+
             # Handle JSONPath
             elif selector.type == SelectorType.JSON:
                 try:
                     jsonpath_expr = parse(selector.value)
                     matches = jsonpath_expr.find(current_data)
                     results.extend([match.value for match in matches])
+                    if results: break
                 except Exception as e:
                     logger.warning(f"JSONPath Error ({selector.value}): {e}")
 

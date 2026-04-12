@@ -24,12 +24,15 @@ class JsonResolver:
         results = []
 
         for selector in field.selectors:
-            # [NEW] Handle Raw Regex Selector
+            # Handle Raw Regex Selector
             if selector.type == SelectorType.REGEX:
                 try:
-                    # Find all unique matches in the raw content
-                    matches = list(set(re.findall(selector.value, self.raw_content)))
-                    results.extend(matches)
+                    # Preserve order; deduplicate while maintaining first-seen order
+                    seen = set()
+                    for m in re.findall(selector.value, self.raw_content):
+                        if m not in seen:
+                            seen.add(m)
+                            results.append(m)
                 except Exception as e:
                     logger.warning(f"Regex Error ({selector.value}): {e}")
             
@@ -47,7 +50,7 @@ class JsonResolver:
             return self._resolve_children(field, results)
 
         if field.is_list:
-            return results
+            return [apply_transformers(v, field.transformers) for v in results]
         
         # Apply transformers to single result
         val = results[0] if results else None
@@ -90,12 +93,16 @@ class HtmlResolver:
         results = []
 
         for selector in field.selectors:
-            # [NEW] Handle Raw Regex Selector
+            # Handle Raw Regex Selector
             if selector.type == SelectorType.REGEX:
                 try:
-                    matches = list(set(re.findall(selector.value, self.raw_content)))
-                    results.extend(matches)
-                    if results: break # Prioritize finding something
+                    # Preserve order; deduplicate while maintaining first-seen order
+                    seen: set = set()
+                    for m in re.findall(selector.value, self.raw_content):
+                        if m not in seen:
+                            seen.add(m)
+                            results.append(m)
+                    if results: break
                 except Exception as e:
                     logger.warning(f"Regex Error ({selector.value}): {e}")
                 continue

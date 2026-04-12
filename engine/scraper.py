@@ -7,7 +7,7 @@ import aiofiles
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, Awaitable, cast, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 from itertools import cycle
 from collections import deque
 
@@ -76,9 +76,13 @@ class ScraperEngine:
             if self.config.mode == ScrapeMode.LIST:
                 await self._run_list_mode(incomplete_urls)
             else:
-                await self._run_pagination_mode()
+                # Resume pagination from the last incomplete URL if checkpointing is on
+                resume_url: Optional[str] = None
+                if incomplete_urls:
+                    resume_url = incomplete_urls[0]
+                    logger.info(f"🔁 Resuming pagination from checkpoint: {resume_url}")
+                await self._run_pagination_mode(resume_url=resume_url)
             
-            # [FIX #1] Prevent Data Loss on Success
             await self._flush_remaining_batches()
 
         except asyncio.CancelledError:
@@ -169,15 +173,17 @@ class ScraperEngine:
         while not self.shutdown_requested:
             try:
                 url = await queue.get()
-                try: await self._process_url(url)
-                finally: queue.task_done()
-            except asyncio.CancelledError: break
-            
-            # [FIXED] Log Worker Exceptions
-            except Exception as e:
-                logger.exception(f"Worker crashed on URL: {e}")
-                self.shutdown_requested = True  # Signal shutdown
-                raise  # Or re-raise after cleanup
+                try:
+                    await self._process_url(url)
+                except Exception as e:
+                    # _process_url has its own broad try/except; if something truly
+                    # unexpected bubbles up (e.g. lock error), log it but keep the
+                    # worker alive so other URLs can still be processed.
+                    logger.exception(f"Unexpected worker error on URL {url}: {e}")
+                finally:
+                    queue.task_done()
+            except asyncio.CancelledError:
+                break
 
     async def _process_url(self, url: str):
         if not self._is_allowed(url):
@@ -202,9 +208,43 @@ class ScraperEngine:
                 self.failed_urls.append(url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
 
-    async def _run_pagination_mode(self):
+    def _build_next_url(self, current_url: str, next_value: str) -> Optional[str]:
+        """
+        Compute the next page URL from the current URL and the next_value token.
+
+        For HTML pagination the next_value is typically a relative href that should
+        be resolved with urljoin.  For JSON API pagination it is often a cursor token
+        that must be appended as a query parameter (configurable via
+        ``pagination.query_param``, default ``"after"``).
+        """
+        if not next_value:
+            return None
+
+        is_json = self.config.response_type == "json"
+
+        # If the value already looks like an absolute or relative URL, resolve it.
+        if next_value.startswith("http") or next_value.startswith("/"):
+            return urljoin(current_url, next_value)
+
+        if is_json:
+            # Treat as a query-parameter cursor token
+            param_name = (
+                self.config.pagination.query_param
+                if self.config.pagination
+                else "after"
+            )
+            parsed = urlparse(current_url)
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            params[param_name] = [next_value]
+            new_query = urlencode(params, doseq=True)
+            return urlunparse(parsed._replace(query=new_query))
+
+        # Fallback: standard relative URL resolution for HTML
+        return urljoin(current_url, next_value)
+
+    async def _run_pagination_mode(self, resume_url: Optional[str] = None):
         if not self.config.base_url: return
-        current_url = str(self.config.base_url)
+        current_url = resume_url or str(self.config.base_url)
         pages = 0
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
 
@@ -229,8 +269,12 @@ class ScraperEngine:
                 if self.config.pagination and pages < max_pages:
                     next_link = resolver.get_attribute(self.config.pagination.selector, "href")
                     if next_link:
-                        current_url = urljoin(current_url, next_link)
-                        await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
+                        next_url = self._build_next_url(current_url, next_link)
+                        if next_url:
+                            current_url = next_url
+                            await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
+                        else:
+                            current_url = None
                     else:
                         current_url = None
                 else:
@@ -305,7 +349,7 @@ class ScraperEngine:
             safe_name = hashlib.md5(url.encode()).hexdigest()[:8]
             filename = debug_dir / f"fail_{timestamp}_{safe_name}.html"
             async with aiofiles.open(filename, "w", encoding="utf-8") as f:
-                await f.write(f"\n")
+                await f.write(f"<!-- Failed URL: {url} -->\n")
                 await f.write(html)
             logger.warning(f"📸 Snapshot saved: {filename}")
         except Exception as e:
@@ -315,10 +359,11 @@ class ScraperEngine:
         if not any(page_data.values()): return
         data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True).encode()).hexdigest()
         
+        # Bloom filter is the primary deduplication gate; the recent deque provides
+        # fast short-circuit for back-to-back identical pages.
         if data_hash in self.seen_hashes:
-            if data_hash in self.recent_hashes:
-                logger.debug(f"Skipped duplicate entry: {data_hash[:8]}")
-                return
+            logger.debug(f"Skipped duplicate entry: {data_hash[:8]}")
+            return
 
         self.seen_hashes.add(data_hash)
         self.recent_hashes.append(data_hash)
@@ -347,6 +392,18 @@ class ScraperEngine:
 
     async def ensure_active_token(self):
         if not self.config.authentication: return
+
+        auth_config = self.config.authentication
+
+        # Bearer type: static token supplied directly in config — no refresh needed
+        if auth_config.type == "bearer":
+            if not self.auth_token and auth_config.client_secret:
+                self.auth_token = auth_config.client_secret
+                # Treat as non-expiring
+                self.token_expires_at = datetime.max
+                logger.info("🔑 Bearer token loaded from config")
+            return
+
         if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)): return
 
         session_to_close = None
@@ -355,8 +412,7 @@ class ScraperEngine:
             if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
                 return
 
-            logger.info(f"🔄 Refreshing OAuth Token for {self.config.authentication.type}...")
-            auth_config = self.config.authentication
+            logger.info(f"🔄 Refreshing OAuth Token for {auth_config.type}...")
             
             if not self.session: self._init_session()
             if not self.session: raise RuntimeError("Failed to initialize session")
@@ -400,7 +456,12 @@ class ScraperEngine:
                     await session_to_close.close()
                 raise e
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10), retry=retry_if_exception_type(Exception))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
     async def _fetch_page(self, url: str) -> str:
         if self.config.authentication:
             await self.ensure_active_token()
@@ -415,12 +476,11 @@ class ScraperEngine:
         if self.browser_manager:
             return await self.browser_manager.fetch_page(url, headers=headers)
         else:
-            # [FIX #3] Raise Error for Silent Failure
             if not self.session: raise RuntimeError("Session not initialized")
             try:
                 proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
                 
-                # [FIXED] Cast to Any because Pylance misidentifies AsyncSession.get return type as Never
+                # Cast to Any because Pylance misidentifies AsyncSession.get return type as Never
                 session: Any = self.session
                 
                 response = await session.get(
@@ -435,6 +495,8 @@ class ScraperEngine:
                     raise Exception(f"Blocked/Auth Error: {response.status_code}")
                 else:
                     return ""
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(f"Network Error: {e}")
                 raise e

@@ -128,8 +128,9 @@ class BrowserManager:
             if stealth_async:
                 await stealth_async(page)
             
-            # Navigate
-            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            # Navigate — use the configured request_timeout (converted from seconds to ms)
+            nav_timeout_ms = (self.config.request_timeout or 30) * 1000
+            await page.goto(url, timeout=nav_timeout_ms, wait_until="domcontentloaded")
             
             # Handle Interactions
             if self.config.interactions:
@@ -140,7 +141,10 @@ class BrowserManager:
                 try:
                     await page.wait_for_selector(self.config.wait_for_selector, timeout=5000)
                 except Exception:
-                    pass
+                    logger.warning(
+                        f"⏳ wait_for_selector '{self.config.wait_for_selector}' "
+                        f"timed out on {url} — scraping available content"
+                    )
 
             return await page.content()
         except Exception as e:

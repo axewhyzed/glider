@@ -1,0 +1,38 @@
+{
+  "name": "hacker_news",
+  "base_url": "https://news.ycombinator.com",
+  "mode": "pagination",
+  "rate_limit": 2,
+  "min_delay": 2,
+  "max_delay": 4,
+  "respect_robots_txt": true,
+  "use_checkpointing": true,
+  "fields": [
+    {
+      "name": "stories",
+      "selector": "tr.athing",
+      "is_list": true,
+      "children": [
+        {
+          "name": "rank",
+          "selector": "span.rank",
+          "transformers": ["strip", "to_int"]
+        },
+        {
+          "name": "title",
+          "selector": "span.titleline a",
+          "transformers": ["strip"]
+        },
+        {
+          "name": "url",
+          "selector": "span.titleline a",
+          "attribute": "href"
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "selector": "a.morelink",
+    "max_pages": 5
+  }
+}

@@ -181,6 +181,18 @@ When `true`, Glider fetches `robots.txt` from the root of `base_url` at startup 
 
 ---
 
+### `append_json_suffix` — bool · Default: `false`
+
+When `true` and `follow_url` is used, Glider appends `.json` to any child URL that does not already end with `.json`.  This is a **Reddit-specific** convention: Reddit's JSON API returns data at URLs ending in `.json` (e.g. `/r/python/comments/abc/` → `/r/python/comments/abc/.json`).
+
+Leave this `false` for all other JSON APIs to avoid corrupting URLs.
+
+```json
+"append_json_suffix": true
+```
+
+---
+
 ### `max_nested_urls` — int 1–100 · Default: `5`
 
 Maximum number of child URLs to follow per parent page when a field has `follow_url: true`.  Acts as a safety cap against unexpectedly large link lists.

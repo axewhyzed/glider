@@ -96,7 +96,14 @@ class ScraperEngine:
     async def _setup_resources(self):
         await self.checkpoint.initialize()
         self.seen_hashes.load(self.bloom_path)
-        
+
+        # Warn early if browser interactions are configured but Playwright is disabled
+        if self.config.interactions and not self.config.use_playwright:
+            logger.warning(
+                "⚠️ 'interactions' are defined but 'use_playwright' is false — "
+                "interactions will be ignored.  Set 'use_playwright': true to enable them."
+            )
+
         if self.browser_manager:
             proxy = self._get_next_proxy()
             await self.browser_manager.start(proxy)
@@ -155,9 +162,10 @@ class ScraperEngine:
         if not self.config.respect_robots_txt or not self.robots_parser: return True
         return self.robots_parser.can_fetch("*", url)
 
-    async def _run_list_mode(self, incomplete_urls: List[str] = []):
+    async def _run_list_mode(self, incomplete_urls: Optional[List[str]] = None):
         raw_urls = self.config.start_urls or []
-        all_urls = list(set([str(u) for u in raw_urls] + incomplete_urls))
+        extra = incomplete_urls or []
+        all_urls = list(set([str(u) for u in raw_urls] + extra))
         queue_urls = [u for u in all_urls if not self.checkpoint.is_done(u)]
         if not queue_urls: return
 
@@ -249,7 +257,9 @@ class ScraperEngine:
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
 
         while pages < max_pages and current_url and not self.shutdown_requested:
-            if not self._is_allowed(current_url): break
+            if not self._is_allowed(current_url):
+                if self.stats_callback: self.stats_callback(StatsEvent("blocked"))
+                break
             logger.info(f"📄 Page {pages + 1}: {current_url}")
             await self.checkpoint.mark_in_progress(current_url)
             
@@ -283,6 +293,7 @@ class ScraperEngine:
                 logger.error(f"Page failed: {e}")
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, current_url)
+                if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
                 break
 
     async def _process_content(self, content: str, url: str = "", fields: Optional[List[DataField]] = None) -> Tuple[Dict[str, Any], Any]:
@@ -306,7 +317,10 @@ class ScraperEngine:
                 
                 for relative_url in urls_to_follow:
                     full_child_url = urljoin(url, str(relative_url))
-                    if self.config.response_type == "json" and not full_child_url.endswith(".json"):
+                    # Append .json only when explicitly requested (Reddit-style APIs).
+                    # This is opt-in via config.append_json_suffix to avoid mangling
+                    # URLs for generic JSON APIs.
+                    if self.config.append_json_suffix and not full_child_url.endswith(".json"):
                         parsed = urlparse(full_child_url)
                         path = parsed.path.rstrip('/')
                         full_child_url = f"{parsed.scheme}://{parsed.netloc}{path}.json"
@@ -330,8 +344,8 @@ class ScraperEngine:
                             nested_results_list.append(child_data)
                             await self.checkpoint.mark_done(full_child_url)
                             if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
-                        else:
-                            pass
+                            # Polite delay between child-page requests to avoid hammering the server
+                            await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
 
                     except Exception as e:
                         logger.warning(f"Failed to follow {full_child_url}: {e}")
@@ -355,14 +369,31 @@ class ScraperEngine:
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
 
+    @staticmethod
+    def _count_items(page_data: Dict[str, Any]) -> int:
+        """Count the number of extracted items in a page_data dict.
+
+        If any field value is a list, the sum of all list lengths is returned.
+        For simple flat records (no list fields) the result is 1.
+        This drives the 'entries_added' stats counter so the dashboard shows
+        meaningful record counts rather than page counts.
+        """
+        total = sum(len(v) for v in page_data.values() if isinstance(v, list))
+        return total if total > 0 else 1
+
     async def _merge_data(self, page_data: Dict[str, Any]):
         if not any(page_data.values()): return
-        data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True).encode()).hexdigest()
+        try:
+            data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True, default=str).encode()).hexdigest()
+        except Exception as e:
+            logger.warning(f"Skipping un-hashable page data: {e}")
+            return
         
         # Bloom filter is the primary deduplication gate; the recent deque provides
         # fast short-circuit for back-to-back identical pages.
         if data_hash in self.seen_hashes:
             logger.debug(f"Skipped duplicate entry: {data_hash[:8]}")
+            if self.stats_callback: self.stats_callback(StatsEvent("page_skipped"))
             return
 
         self.seen_hashes.add(data_hash)
@@ -378,7 +409,8 @@ class ScraperEngine:
         if batch_to_flush:
             await self._flush_batch(batch_to_flush)
             if self.stats_callback:
-                self.stats_callback(StatsEvent("entries_added", count=len(batch_to_flush)))
+                item_count = sum(self._count_items(item) for item in batch_to_flush)
+                self.stats_callback(StatsEvent("entries_added", count=item_count))
 
     async def _flush_batch(self, batch: List[Dict[str, Any]]):
         if self.output_callback and batch:
@@ -388,7 +420,11 @@ class ScraperEngine:
         async with self.data_lock:
             batch = self.pending_batch.copy()
             self.pending_batch = []
-        if batch: await self._flush_batch(batch)
+        if batch:
+            await self._flush_batch(batch)
+            if self.stats_callback:
+                item_count = sum(self._count_items(item) for item in batch)
+                self.stats_callback(StatsEvent("entries_added", count=item_count))
 
     async def ensure_active_token(self):
         if not self.config.authentication: return

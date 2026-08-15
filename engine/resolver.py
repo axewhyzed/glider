@@ -1,11 +1,29 @@
 import json
 import re # <--- NEW
+from functools import lru_cache
 from jsonpath_ng import parse
 from lxml import html as lxml_html
 from typing import Any, List, Optional
 from loguru import logger
 from engine.schemas import DataField, SelectorType
 from engine.utils import apply_transformers
+
+
+class ResolverParseError(ValueError):
+    """Raised when a response cannot be parsed as the configured type."""
+
+
+# Compilation-only caches: the compiled objects are immutable and stateless,
+# so nothing job-specific leaks across crawls. Bounded to avoid unbounded
+# growth in long-running multi-config processes.
+@lru_cache(maxsize=512)
+def _compile_jsonpath(expr: str):
+    return parse(expr)
+
+
+@lru_cache(maxsize=512)
+def _compile_regex(pattern: str):
+    return re.compile(pattern)
 
 class JsonResolver:
     """
@@ -16,9 +34,8 @@ class JsonResolver:
         self.raw_content = content # <--- Keep raw content for Regex
         try:
             self.data = json.loads(content)
-        except json.JSONDecodeError:
-            self.data = {}
-            logger.error("❌ Failed to parse JSON content")
+        except json.JSONDecodeError as exc:
+            raise ResolverParseError("Response is not valid JSON") from exc
 
     def resolve_field(self, field: DataField, context: Any = None) -> Any:
         current_data = context if context is not None else self.data
@@ -28,9 +45,14 @@ class JsonResolver:
             # Handle Raw Regex Selector
             if selector.type == SelectorType.REGEX:
                 try:
+                    regex_source = (
+                        self.raw_content
+                        if context is None
+                        else json.dumps(current_data, ensure_ascii=False, default=str)
+                    )
                     # Preserve order; deduplicate while maintaining first-seen order
                     seen = set()
-                    for m in re.findall(selector.value, self.raw_content):
+                    for m in _compile_regex(selector.value).findall(regex_source):
                         if m not in seen:
                             seen.add(m)
                             results.append(m)
@@ -42,7 +64,7 @@ class JsonResolver:
             # Handle JSONPath
             elif selector.type == SelectorType.JSON:
                 try:
-                    jsonpath_expr = parse(selector.value)
+                    jsonpath_expr = _compile_jsonpath(selector.value)
                     matches = jsonpath_expr.find(current_data)
                     results.extend([match.value for match in matches])
                     if results: break
@@ -83,10 +105,11 @@ class JsonResolver:
         # SelectorType.CSS by the schema, so checking only for SelectorType.JSON would
         # silently break JSON-API pagination when the shorthand syntax is used.
         try:
-            jsonpath_expr = parse(selector_obj.value)
+            jsonpath_expr = _compile_jsonpath(selector_obj.value)
             matches = jsonpath_expr.find(self.data)
             if matches:
-                return str(matches[0].value)
+                value = matches[0].value
+                return None if value is None else str(value)
         except Exception:
             pass
         return None
@@ -108,7 +131,7 @@ class HtmlResolver:
                 try:
                     # Preserve order; deduplicate while maintaining first-seen order
                     seen: set = set()
-                    for m in re.findall(selector.value, self.raw_content):
+                    for m in _compile_regex(selector.value).findall(self.raw_content):
                         if m not in seen:
                             seen.add(m)
                             results.append(m)
@@ -170,6 +193,17 @@ class HtmlResolver:
     def _resolve_child_field(self, parent_element, field: DataField) -> Any:
         results = []
         for selector in field.selectors:
+            if selector.type == SelectorType.REGEX:
+                try:
+                    parent_html = lxml_html.tostring(parent_element, encoding="unicode")
+                    for match in _compile_regex(selector.value).findall(parent_html):
+                        value = match if isinstance(match, str) else "".join(match)
+                        results.append(apply_transformers(value, field.transformers))
+                except Exception as exc:
+                    logger.warning(f"Regex Error ({selector.value}): {exc}")
+                if results:
+                    break
+                continue
             found = self._select_elements(parent_element, selector.type, selector.value)
             for item in found:
                 val = self._extract_value(item, field)

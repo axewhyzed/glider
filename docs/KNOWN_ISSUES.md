@@ -82,6 +82,12 @@ When a field value is a list (e.g. `tags: ["python", "news"]`), the CSV export c
 
 ---
 
+### L12 — DNS Rebinding Residual Risk
+
+Application-level DNS/IP checks (private-network blocking, `resolve_dns` pre-flight, browser request interception) cannot fully prevent a DNS rebinding attack where a resolver returns a public IP at validation time and a private IP at request time. Non-browser mode mitigates via hop-level policy checks (documented residual risk); browser mode adds request-interception abort of private-IP navigation.
+
+---
+
 ## 📋 Unimplemented / Planned Features
 
 | Feature | Notes |

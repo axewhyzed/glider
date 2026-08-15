@@ -1,0 +1,8 @@
+# Development dependencies — install with:
+#   venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+# or:   pip install -e ".[dev,browser]"
+-r requirements.txt
+pytest==9.0.2
+pytest-asyncio==1.3.0
+playwright==1.57.0
+playwright-stealth==1.0.6

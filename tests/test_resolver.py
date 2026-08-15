@@ -150,3 +150,46 @@ def test_json_regex_fallback_to_second_selector_when_first_misses():
     )
     result = resolver.resolve_field(field)
     assert result == "World"
+
+
+# --- Selector compile cache tests (P6.3) ---
+
+def test_jsonpath_cache_returns_compiled_expr():
+    from engine.resolver import _compile_jsonpath
+    first = _compile_jsonpath("data.after")
+    second = _compile_jsonpath("data.after")
+    assert first is second
+
+
+def test_regex_cache_returns_compiled_pattern():
+    from engine.resolver import _compile_regex
+    first = _compile_regex(r"Order #(\d+)")
+    second = _compile_regex(r"Order #(\d+)")
+    assert first is second
+
+
+def test_cached_compile_still_resolves_correctly():
+    resolver = JsonResolver('{"data": {"after": "tok"}}')
+    sel = Selector(type=SelectorType.JSON, value="data.after")
+    assert resolver.get_attribute(sel, "href") == "tok"
+
+
+def test_compile_cache_bounded():
+    from engine.resolver import _compile_regex
+    _compile_regex.cache_clear()
+    for i in range(600):
+        _compile_regex(f"pattern-{i}")
+    assert _compile_regex.cache_info().currsize <= 512
+    _compile_regex.cache_clear()
+
+
+def test_no_job_state_in_compile_cache():
+    """Compiled expressions are stateless: same input, same object, no bound results."""
+    from engine.resolver import _compile_jsonpath
+    first = _compile_jsonpath("$.items[*]")
+    second = _compile_jsonpath("$.items[*]")
+    assert first is second
+    # Cache hit does not change resolution
+    resolver = JsonResolver('{"items": [{"v": 1}]}')
+    sel = Selector(type=SelectorType.JSON, value="$.items[*].v")
+    assert resolver.resolve_field(DataField(name="v", selectors=[sel], is_list=True)) == [1]

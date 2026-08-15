@@ -80,7 +80,9 @@ def load_config(path: str) -> Dict[str, Any]:
     
     def replace_env(match):
         var_name = match.group(1) or match.group(2)
-        return os.environ.get(var_name, match.group(0))
+        if var_name not in os.environ:
+            raise KeyError(f"Environment variable is not set: {var_name}")
+        return os.environ[var_name]
         
     expanded_content = pattern.sub(replace_env, content)
     return json.loads(expanded_content)

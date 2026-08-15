@@ -2,18 +2,16 @@ import asyncio
 import random
 import hashlib
 import json
-import urllib.robotparser
+import time
 import aiofiles
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Callable, Awaitable, cast, Tuple
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 from itertools import cycle
-from collections import deque
 
 from curl_cffi.requests import AsyncSession
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from aiolimiter import AsyncLimiter
 from fake_useragent import UserAgent
 
@@ -22,28 +20,59 @@ from engine.checkpoint import CheckpointManager
 from engine.schemas import ScraperConfig, ScrapeMode, StatsEvent, DataField
 from engine.resolver import HtmlResolver, JsonResolver
 from engine.browser import BrowserManager
+from engine.network import (
+    FetchResult,
+    HttpStatusError,
+    RequestPurpose,
+    UrlPolicy,
+    UrlPolicyError,
+    backoff_seconds,
+    canonicalize_url,
+    is_retryable_status,
+    origin,
+    resolve_url,
+    retry_after_seconds,
+)
+from engine.errors import AuthError, ErrorCategory, FetchError, NON_RETRYABLE_CATEGORIES
+from engine.robots import RobotsCache
+from engine.run import RunContext
 
 class ScraperEngine:
     def __init__(
         self, 
         config: ScraperConfig, 
         output_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-        stats_callback: Optional[Callable[[StatsEvent], None]] = None
+        stats_callback: Optional[Callable[[StatsEvent], None]] = None,
+        run_context: Optional[RunContext] = None,
+        limit: Optional[int] = None,
+        dry_run: bool = False,
+        stream_writer: Optional["JsonlStreamWriter"] = None,
     ):
         self.config = config
         self.failed_urls: List[str] = []
+        # Bounded in-memory failure ring (P7.4). Full failures stream to
+        # run_context.failures_path; this ring powers stats + report previews.
+        from collections import deque as _deque
+        self.failures_ring: "Any" = _deque(maxlen=config.max_failed_entries)
         self.output_callback = output_callback
         self.stats_callback = stats_callback
+        self.stream_writer = stream_writer
         
-        self.checkpoint = CheckpointManager(config.name, config.use_checkpointing)
+        self.run_context = run_context
+        self.dry_run = dry_run
+        checkpoint_path = run_context.checkpoint_path if run_context else None
+        checkpoint_enabled = (config.use_checkpointing or run_context is not None) and not dry_run
+        self.checkpoint = CheckpointManager(config.name, checkpoint_enabled, checkpoint_path)
         self.browser_manager = BrowserManager(config) if config.use_playwright else None
-        self.robots_parser: Optional[urllib.robotparser.RobotFileParser] = None
+        self.robots_cache: Optional[RobotsCache] = None
         self.session: Optional[AsyncSession] = None
         
         self.data_lock = asyncio.Lock() 
-        self.bloom_path = Path("data") / f"{config.name.replace(' ', '_').lower()}.bloom"
-        self.seen_hashes = BloomFilter(capacity=100000, error_rate=0.001)
-        self.recent_hashes = deque(maxlen=1000)
+        self.bloom_path = run_context.bloom_path if run_context else Path("data") / f"{config.name.replace(' ', '_').lower()}.bloom"
+        self.seen_hashes = BloomFilter(capacity=config.dedup.capacity, error_rate=config.dedup.error_rate)
+        # Exact dedup authority: bounded LRU (OrderedDict). Bloom is only a gate.
+        from collections import OrderedDict
+        self.exact_seen: OrderedDict[str, None] = OrderedDict()
         
         self.rate_limiter = AsyncLimiter(self.config.rate_limit, 1) 
         self.ua_rotator = UserAgent()
@@ -56,23 +85,33 @@ class ScraperEngine:
         self.batch_size = 10
         self.pending_batch: List[Dict[str, Any]] = []
         self.shutdown_requested = False
+        self.limit = limit
+        self.url_policy = UrlPolicy(config.url_policy)
 
         self.auth_token: Optional[str] = None
         self.token_expires_at: datetime = datetime.min
         self._auth_lock = asyncio.Lock() 
+        self.child_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._child_inflight: Dict[str, asyncio.Future] = {}
+        self.depth_first_seen: Dict[str, int] = {}
+        from engine.metrics import MetricsCollector
+        self.metrics = MetricsCollector()
 
     async def run(self):
         logger.info(f"🚀 Starting Engine for: {self.config.name}")
-        await self._setup_resources()
-        
-        if self.config.respect_robots_txt and self.config.base_url:
-            await self._init_robots_txt()
-            
-        incomplete_urls = await self.checkpoint.get_incomplete()
-        if incomplete_urls:
-            incomplete_urls = [u for u in incomplete_urls if not self.checkpoint.is_done(u)]
-
         try:
+            await self._setup_resources()
+
+            # Warm the robots cache lazily (no fetch until first can_fetch).
+            if self.config.respect_robots_txt and self.config.base_url:
+                await self._init_robots_txt()
+
+            incomplete_urls = await self.checkpoint.get_incomplete(
+                kind="root" if self.config.mode == ScrapeMode.LIST else "pagination"
+            )
+            if incomplete_urls:
+                incomplete_urls = [u for u in incomplete_urls if not self.checkpoint.is_done(u)]
+
             if self.config.mode == ScrapeMode.LIST:
                 await self._run_list_mode(incomplete_urls)
             else:
@@ -87,15 +126,23 @@ class ScraperEngine:
 
         except asyncio.CancelledError:
             logger.warning("⚠️ Shutdown requested - flushing data...")
+            self.shutdown_requested = True  # P9.5: honest manifest state
             await self._flush_remaining_batches()
             raise
         finally:
             await self._cleanup_resources()
+            if self.run_context:
+                self.run_context.update_manifest(
+                    state="cancelled" if self.shutdown_requested else "completed",
+                    finished_at=datetime.utcnow().isoformat() + "Z",
+                    failed_urls=len(self.failed_urls),
+                )
             logger.success("✅ Finished!")
 
     async def _setup_resources(self):
         await self.checkpoint.initialize()
-        self.seen_hashes.load(self.bloom_path)
+        if not self.dry_run:
+            self.seen_hashes.load(self.bloom_path)
 
         # Warn early if browser interactions are configured but Playwright is disabled
         if self.config.interactions and not self.config.use_playwright:
@@ -137,36 +184,63 @@ class ScraperEngine:
         )
 
     async def _cleanup_resources(self):
-        try: self.seen_hashes.save(self.bloom_path)
-        except Exception: pass
+        if not self.dry_run:
+            try: self.seen_hashes.save(self.bloom_path)
+            except Exception: pass
         await self.checkpoint.close()
         if self.browser_manager: await self.browser_manager.close()
         if self.session: await self.session.close()
+        if self.stream_writer: await self.stream_writer.close()
+
+    async def preview(self, url: Optional[str] = None) -> Tuple[FetchResult, Dict[str, Any]]:
+        """Fetch and extract one page without creating durable crawl artifacts."""
+        target = url
+        if not target:
+            target = str(self.config.base_url) if self.config.base_url else None
+        if not target and self.config.start_urls:
+            target = str(self.config.start_urls[0])
+        if not target:
+            raise ValueError("A preview URL is required for list configurations")
+        await self._setup_resources()
+        try:
+            result = await self._fetch_page(target, purpose=RequestPurpose.ROOT)
+            if result.error is not None:
+                raise result.error
+            data, _ = await self._process_content(result.content, result.final_url)
+            return result, data
+        finally:
+            await self._cleanup_resources()
 
     def _get_next_proxy(self) -> Optional[str]:
         return next(self.proxy_pool) if self.proxy_pool else None
 
     async def _init_robots_txt(self):
-        logger.info("🤖 Checking robots.txt...")
-        try:
-            parsed = urlparse(str(self.config.base_url))
-            url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-            self.robots_parser = urllib.robotparser.RobotFileParser()
-            self.robots_parser.set_url(url)
-            await asyncio.get_running_loop().run_in_executor(None, self.robots_parser.read)
-        except Exception as e:
-            logger.warning(f"Failed to fetch robots.txt: {e}. Proceeding without restrictions.")
-            self.robots_parser = None
+        """Warm the per-origin robots cache for the base URL (lazy, no network yet)."""
+        if not self.robots_cache:
+            self.robots_cache = RobotsCache(
+                self._fetch_page,
+                ttl_seconds=self.config.robots_ttl_seconds,
+            )
+        if self.config.base_url:
+            await self.robots_cache.can_fetch(str(self.config.base_url))
 
-    def _is_allowed(self, url: str) -> bool:
-        if not self.config.respect_robots_txt or not self.robots_parser: return True
-        return self.robots_parser.can_fetch("*", url)
+    async def _is_allowed(self, url: str, parent_url: Optional[str] = None) -> bool:
+        try:
+            canonical = self.url_policy.validate(url, parent_url=parent_url)
+        except UrlPolicyError as exc:
+            logger.warning(f"URL blocked by policy: {exc}")
+            return False
+        if not self.config.respect_robots_txt or not self.robots_cache:
+            return True
+        return await self.robots_cache.can_fetch(canonical, parent_url=parent_url)
 
     async def _run_list_mode(self, incomplete_urls: Optional[List[str]] = None):
         raw_urls = self.config.start_urls or []
         extra = incomplete_urls or []
         all_urls = list(set([str(u) for u in raw_urls] + extra))
-        queue_urls = [u for u in all_urls if not self.checkpoint.is_done(u)]
+        queue_urls = [u for u in all_urls if not self.checkpoint.is_done(u, kind="root")]
+        if self.limit is not None:
+            queue_urls = queue_urls[: self.limit]
         if not queue_urls: return
 
         queue = asyncio.Queue()
@@ -174,8 +248,15 @@ class ScraperEngine:
 
         logger.info(f"⚡ Processing {len(queue_urls)} URLs (Concurrency={self.config.concurrency})")
         workers = [asyncio.create_task(self._worker_loop(queue)) for _ in range(self.config.concurrency)]
-        await queue.join()
-        for w in workers: w.cancel()
+        try:
+            await queue.join()
+        finally:
+            # Always stop workers — on the happy path the queue is drained, on
+            # cancellation we must not leave orphaned worker tasks draining the
+            # queue while cleanup tears down shared resources.
+            for w in workers:
+                w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def _worker_loop(self, queue: asyncio.Queue):
         while not self.shutdown_requested:
@@ -193,27 +274,110 @@ class ScraperEngine:
             except asyncio.CancelledError:
                 break
 
+    def _record_failure(self, url: str, error: BaseException) -> None:
+        """Record a failure in the bounded ring and stream to failures.jsonl."""
+        self.failed_urls.append(url)
+        from datetime import datetime as _dt
+        entry = {
+            "url": url,
+            "category": getattr(error, "category", ErrorCategory.INTERNAL).value,
+            "message": str(error)[:200],
+            "timestamp": _dt.utcnow().isoformat() + "Z",
+        }
+        self.failures_ring.append(entry)
+        if self.run_context:
+            asyncio.ensure_future(self.run_context.append_failure(entry))
+
+    def _record_sample(
+        self,
+        origin: str,
+        purpose: str,
+        status_code: int,
+        elapsed_ms: float,
+        attempts: int,
+        category: str,
+        url: str = "",
+    ) -> None:
+        from engine.metrics import RequestSample
+        self.metrics.record(RequestSample(
+            origin=origin,
+            purpose=purpose,
+            status_code=status_code,
+            elapsed_ms=elapsed_ms,
+            attempts=attempts,
+            category=category,
+            url=url,
+        ))
+
+    def _validate_extraction(self, page_data: Dict[str, Any]) -> Optional[str]:
+        """Extraction validation (P6.2). Returns a failure category or None.
+
+        Enforces min_records_per_page / required_fields / fail_on_empty.
+        """
+        validation = self.config.validation
+        if validation.min_records_per_page <= 0 and not validation.required_fields:
+            return None
+        issues = []
+        if validation.min_records_per_page > 0:
+            count = self._count_items(page_data)
+            if count < validation.min_records_per_page:
+                issues.append(f"page has {count} records, expected >= {validation.min_records_per_page}")
+        for required in validation.required_fields:
+            if page_data.get(required) is None:
+                issues.append(f"required field '{required}' is missing")
+        if not issues:
+            return None
+        if validation.fail_on_empty:
+            return "validation_error"
+        logger.warning(f"Extraction validation warning: {'; '.join(issues)}")
+        return None
+
     async def _process_url(self, url: str):
-        if not self._is_allowed(url):
+        if not await self._is_allowed(url):
             if self.stats_callback: self.stats_callback(StatsEvent("blocked"))
             return
 
         async with self.rate_limiter:
-            await self.checkpoint.mark_in_progress(url)
+            await self.checkpoint.mark_in_progress(url, kind="root")
             try:
-                content = await self._fetch_page(url)
-                if content:
-                    data, _ = await self._process_content(content, url)
-                    await self._merge_data(data)
-                    await self.checkpoint.mark_done(url)
+                result = await self._fetch_page(url, purpose=RequestPurpose.ROOT)
+                content = result.content
+                if result.error is not None:
+                    raise result.error
+                if content or result.status_code == 204:
+                    data, _ = await self._process_content(content, result.final_url)
+                    validation_failure = self._validate_extraction(data)
+                    if validation_failure:
+                        raise FetchError(
+                            ErrorCategory.VALIDATION,
+                            url,
+                            validation_failure,
+                        )
+                    await self._merge_data(data, source_url=result.final_url)
+                    await self.checkpoint.mark_done(url, kind="root")
+                    self._record_sample(
+                        origin(url), "root", result.status_code,
+                        result.elapsed_ms, result.attempts, "success", url,
+                    )
                     if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                 else:
                     raise Exception("Empty Content")
+            except FetchError as e:
+                logger.error(f"Failed {url}: {e}")
+                await self.checkpoint.mark_failed(url, kind="root", error=e.category.value)
+                self._record_failure(url, e)
+                self._record_sample(
+                    origin(url), "root", getattr(e, "status_code", 0) or 0,
+                    0.0, getattr(e, "attempts", 1), e.category.value, url,
+                )
+                if self.stats_callback:
+                    self.stats_callback(StatsEvent(e.category.value))
             except Exception as e:
                 logger.error(f"Failed {url}: {e}")
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, url)
-                self.failed_urls.append(url)
+                self._record_failure(url, e)
+                self._record_sample(origin(url), "root", 0, 0.0, 1, "internal_error", url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
 
     def _build_next_url(self, current_url: str, next_value: str) -> Optional[str]:
@@ -255,24 +419,31 @@ class ScraperEngine:
         current_url = resume_url or str(self.config.base_url)
         pages = 0
         max_pages = self.config.pagination.max_pages if self.config.pagination else 1
+        if self.limit is not None:
+            max_pages = min(max_pages, self.limit)
 
         while pages < max_pages and current_url and not self.shutdown_requested:
-            if not self._is_allowed(current_url):
+            if not await self._is_allowed(current_url):
                 if self.stats_callback: self.stats_callback(StatsEvent("blocked"))
                 break
             logger.info(f"📄 Page {pages + 1}: {current_url}")
-            await self.checkpoint.mark_in_progress(current_url)
+            await self.checkpoint.mark_in_progress(current_url, kind="pagination")
             
             try:
                 async with self.rate_limiter:
-                    content = await self._fetch_page(current_url)
+                    result = await self._fetch_page(
+                        current_url, purpose=RequestPurpose.PAGINATION
+                    )
+                    content = result.content
                 
+                if result.error is not None:
+                    raise result.error
                 if not content: raise Exception("Empty")
                 
-                data, resolver = await self._process_content(content, current_url)
-                await self._merge_data(data)
+                data, resolver = await self._process_content(content, result.final_url)
+                await self._merge_data(data, source_url=result.final_url)
                 
-                await self.checkpoint.mark_done(current_url)
+                await self.checkpoint.mark_done(current_url, kind="pagination")
                 if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                 
                 pages += 1
@@ -289,6 +460,12 @@ class ScraperEngine:
                         current_url = None
                 else:
                     current_url = None
+            except FetchError as e:
+                logger.error(f"Page failed: {e}")
+                await self.checkpoint.mark_failed(current_url, kind="pagination", error=e.category.value)
+                self._record_failure(current_url, e)
+                if self.stats_callback: self.stats_callback(StatsEvent(e.category.value))
+                break
             except Exception as e:
                 logger.error(f"Page failed: {e}")
                 if 'content' in locals() and content:
@@ -296,17 +473,44 @@ class ScraperEngine:
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
                 break
 
-    async def _process_content(self, content: str, url: str = "", fields: Optional[List[DataField]] = None) -> Tuple[Dict[str, Any], Any]:
+    async def _process_content(
+        self,
+        content: str,
+        url: str = "",
+        fields: Optional[List[DataField]] = None,
+        depth: int = 0,
+    ) -> Tuple[Dict[str, Any], Any]:
         current_fields = fields or self.config.fields
-        if self.config.response_type == "json":
-             resolver = JsonResolver(content)
-        else:
-             resolver = HtmlResolver(content)
+        # Register this page's URL at its own depth so revisiting it deeper is
+        # recognized as a cycle.
+        if url:
+            self.depth_first_seen.setdefault(url, depth)
+        try:
+            if self.config.response_type == "json":
+                 resolver = JsonResolver(content)
+            else:
+                 resolver = HtmlResolver(content)
+        except Exception as exc:
+            # Unparseable bodies are page failures (PARSE) and are never retried.
+            from engine.errors import classify_exception
+            raise FetchError(
+                classify_exception(exc),
+                url,
+                f"failed to parse response: {exc}",
+                cause=exc,
+            )
 
         data = {}
         for field in current_fields:
             extracted_value = resolver.resolve_field(field)
             if field.follow_url and extracted_value and field.nested_fields:
+                if depth >= self.config.max_depth:
+                    logger.warning(
+                        f"Maximum nested depth {self.config.max_depth} reached at {url}"
+                    )
+                    if self.stats_callback: self.stats_callback(StatsEvent("depth_exhausted"))
+                    data[field.name] = []
+                    continue
                 urls_to_follow = extracted_value if isinstance(extracted_value, list) else [extracted_value]
                 nested_results_list = []
                 max_urls = self.config.max_nested_urls
@@ -316,7 +520,11 @@ class ScraperEngine:
                     logger.info(f"    ↳ Following {len(urls_to_follow)} nested links from {url}...")
                 
                 for relative_url in urls_to_follow:
-                    full_child_url = urljoin(url, str(relative_url))
+                    try:
+                        full_child_url = resolve_url(url, str(relative_url))
+                    except UrlPolicyError as exc:
+                        logger.warning(f"Skipping invalid child URL {relative_url}: {exc}")
+                        continue
                     # Append .json only when explicitly requested (Reddit-style APIs).
                     # This is opt-in via config.append_json_suffix to avoid mangling
                     # URLs for generic JSON APIs.
@@ -325,30 +533,109 @@ class ScraperEngine:
                         path = parsed.path.rstrip('/')
                         full_child_url = f"{parsed.scheme}://{parsed.netloc}{path}.json"
 
-                    if not self._is_allowed(full_child_url): continue
-                    if self.checkpoint.is_done(full_child_url): continue
-                    
+                    if not await self._is_allowed(full_child_url, parent_url=url):
+                        continue
+
+                    # Cycle detection: same canonical URL revisited at a STRICTLY
+                    # greater depth than its first sighting is a cycle — stop the
+                    # branch (attach cached result if present, else skip).
+                    first_seen = self.depth_first_seen.get(full_child_url)
+                    child_depth = depth + 1
+                    if first_seen is not None and child_depth > first_seen:
+                        logger.debug(f"Cycle detected at {full_child_url} (depth {child_depth})")
+                        if self.stats_callback: self.stats_callback(StatsEvent("cycle_detected"))
+                        continue
+                    self.depth_first_seen.setdefault(full_child_url, child_depth)
+
                     try:
-                        await self.checkpoint.mark_in_progress(full_child_url)
-                        async with self.rate_limiter:
-                            child_content = await self._fetch_page(full_child_url)
-                        
-                        if child_content:
-                            child_data, _ = await self._process_content(
-                                child_content, 
-                                full_child_url, 
-                                fields=field.nested_fields
-                            )
+                        cache_key = (
+                            full_child_url,
+                            field.model_dump_json(exclude={"name"}, exclude_none=True),
+                        )
+                    except AttributeError:
+                        cache_key = (full_child_url, field.name)
+                    cached_child = self.child_cache.get(cache_key)
+                    if cached_child is not None:
+                        child_data = dict(cached_child)
+                        child_data["_source_url"] = full_child_url
+                        child_data["_parent_url"] = url
+                        nested_results_list.append(child_data)
+                        continue
+
+                    # Fetch-level dedup: a child already done is never re-fetched.
+                    if self.checkpoint.is_done(full_child_url, kind="nested"):
+                        persisted = await self.checkpoint.get_child_results(full_child_url, cache_key[1])
+                        if url in persisted:
+                            try:
+                                child_data = json.loads(persisted[url])
+                            except Exception:
+                                child_data = None
+                            if child_data is not None:
+                                child_data["_source_url"] = full_child_url
+                                child_data["_parent_url"] = url
+                                nested_results_list.append(child_data)
+                                continue
+
+                    # Inflight dedup: two workers hitting the same child await one fetch.
+                    inflight = self._child_inflight.get(full_child_url)
+                    if inflight is not None:
+                        try:
+                            child_data = await inflight
+                        except Exception as exc:
+                            logger.warning(f"Inflight child {full_child_url} failed: {exc}")
+                            continue
+                        if child_data is not None:
+                            child_data = dict(child_data)
                             child_data["_source_url"] = full_child_url
                             child_data["_parent_url"] = url
                             nested_results_list.append(child_data)
-                            await self.checkpoint.mark_done(full_child_url)
+                        continue
+
+                    future = asyncio.get_running_loop().create_future()
+                    self._child_inflight[full_child_url] = future
+                    try:
+                        await self.checkpoint.mark_in_progress(
+                            full_child_url, kind="nested", parent_url=url, depth=child_depth
+                        )
+                        async with self.rate_limiter:
+                            child_result = await self._fetch_page(
+                                full_child_url,
+                                purpose=RequestPurpose.NESTED,
+                                parent_url=url,
+                            )
+                            child_content = child_result.content
+
+                        if child_result.error is not None:
+                            raise child_result.error
+                        if child_content:
+                            child_data, _ = await self._process_content(
+                                child_content,
+                                child_result.final_url,
+                                fields=field.nested_fields,
+                                depth=child_depth,
+                            )
+                            self.child_cache[cache_key] = dict(child_data)
+                            await self.checkpoint.mark_child_result(
+                                full_child_url, url, cache_key[1], json.dumps(child_data, default=str)
+                            )
+                            future.set_result(dict(child_data))
+                            child_data["_source_url"] = full_child_url
+                            child_data["_parent_url"] = url
+                            nested_results_list.append(child_data)
+                            await self.checkpoint.mark_done(full_child_url, kind="nested")
                             if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
                             # Polite delay between child-page requests to avoid hammering the server
                             await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
 
+                    except FetchError as e:
+                        logger.warning(f"Failed to follow {full_child_url}: {e}")
+                        await self.checkpoint.mark_failed(full_child_url, kind="nested", error=e.category.value)
                     except Exception as e:
                         logger.warning(f"Failed to follow {full_child_url}: {e}")
+                    finally:
+                        self._child_inflight.pop(full_child_url, None)
+                        if not future.done():
+                            future.set_result(None)
 
                 data[field.name] = nested_results_list
             else:
@@ -356,16 +643,48 @@ class ScraperEngine:
         return data, resolver
 
     async def _save_debug_snapshot(self, html: str, url: str):
+        """Save a bounded debug snapshot (P7.5): count/size/retention caps."""
         try:
-            debug_dir = Path("debug")
-            debug_dir.mkdir(exist_ok=True)
+            snap_config = self.config.debug_snapshots
+            if not snap_config.enabled:
+                return
+            debug_dir = self.run_context.debug_directory if self.run_context else Path("debug")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            # Cap by file count (keep newest).
+            existing = sorted(debug_dir.glob("fail_*.html"), key=lambda p: p.stat().st_mtime)
+            while len(existing) >= snap_config.max_files:
+                oldest = existing.pop(0)
+                try:
+                    oldest.unlink()
+                except OSError:
+                    pass
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_name = hashlib.md5(url.encode()).hexdigest()[:8]
             filename = debug_dir / f"fail_{timestamp}_{safe_name}.html"
+
+            # Truncate content to max_bytes_per_file.
+            body = html
+            if snap_config.max_bytes_per_file > 0 and len(body.encode("utf-8")) > snap_config.max_bytes_per_file:
+                body = body[:snap_config.max_bytes_per_file] + "\n<!-- truncated -->\n"
+
             async with aiofiles.open(filename, "w", encoding="utf-8") as f:
                 await f.write(f"<!-- Failed URL: {url} -->\n")
-                await f.write(html)
+                await f.write(body)
             logger.warning(f"📸 Snapshot saved: {filename}")
+
+            # Cap by total bytes (sweep oldest).
+            if snap_config.max_total_bytes > 0:
+                total = sum(p.stat().st_size for p in debug_dir.glob("fail_*.html"))
+                for snapshot in sorted(debug_dir.glob("fail_*.html"), key=lambda p: p.stat().st_mtime):
+                    if total <= snap_config.max_total_bytes:
+                        break
+                    total -= snapshot.stat().st_size
+                    try:
+                        snapshot.unlink()
+                    except OSError:
+                        pass
         except Exception as e:
             logger.error(f"Failed to save snapshot: {e}")
 
@@ -381,24 +700,64 @@ class ScraperEngine:
         total = sum(len(v) for v in page_data.values() if isinstance(v, list))
         return total if total > 0 else 1
 
-    async def _merge_data(self, page_data: Dict[str, Any]):
-        if not any(page_data.values()): return
+    def _dedup_key(self, page_data: Dict[str, Any], source_url: Optional[str] = None) -> Optional[str]:
+        """Compute the dedup key per the configured DedupMode (P7.1).
+
+        Returns None for mode ``none`` (no dedup) or when the key cannot be
+        computed (in which case the record is emitted — never dropped).
+        """
+        mode = self.config.dedup.mode
+        if mode == "none":
+            return None
         try:
-            data_hash = hashlib.md5(json.dumps(page_data, sort_keys=True, default=str).encode()).hexdigest()
+            if mode == "url":
+                return source_url or ""
+            if mode == "fields":
+                subset = {k: page_data[k] for k in self.config.dedup.fields if k in page_data}
+                return hashlib.md5(
+                    json.dumps(subset, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            # exact_hash (default) — current behaviour
+            return hashlib.md5(
+                json.dumps(page_data, sort_keys=True, default=str).encode()
+            ).hexdigest()
         except Exception as e:
             logger.warning(f"Skipping un-hashable page data: {e}")
+            return None
+
+    async def _merge_data(self, page_data: Dict[str, Any], source_url: Optional[str] = None):
+        if not page_data:
             return
-        
-        # Bloom filter is the primary deduplication gate; the recent deque provides
-        # fast short-circuit for back-to-back identical pages.
-        if data_hash in self.seen_hashes:
-            logger.debug(f"Skipped duplicate entry: {data_hash[:8]}")
+
+        key = self._dedup_key(page_data, source_url)
+        if key is None:
+            # No dedup configured (or un-hashable) -> emit unconditionally.
+            async with self.data_lock:
+                self.pending_batch.append(page_data)
+            await self._flush_remaining_batches()
+            return
+
+        # Exact set is the authority: a Bloom false positive must never drop data.
+        if key in self.exact_seen:
+            logger.debug(f"Skipped duplicate entry: {key[:8]}")
+            self.metrics.record_duplicate()
             if self.stats_callback: self.stats_callback(StatsEvent("page_skipped"))
             return
 
-        self.seen_hashes.add(data_hash)
-        self.recent_hashes.append(data_hash)
-        
+        if key in self.seen_hashes:
+            # Bloom says "maybe present" — confirm against the exact set.
+            if key in self.exact_seen:
+                self.metrics.record_duplicate()
+                if self.stats_callback: self.stats_callback(StatsEvent("page_skipped"))
+                return
+            # Bloom false positive: emit (correctness wins over memory).
+
+        self.seen_hashes.add(key)
+        # Bounded LRU: evict oldest when at capacity (Bloom still gates dupes).
+        self.exact_seen[key] = None
+        if len(self.exact_seen) > self.config.dedup.exact_capacity:
+            self.exact_seen.popitem(last=False)
+
         batch_to_flush: List[Dict[str, Any]] = []
         async with self.data_lock:
             self.pending_batch.append(page_data)
@@ -413,8 +772,12 @@ class ScraperEngine:
                 self.stats_callback(StatsEvent("entries_added", count=item_count))
 
     async def _flush_batch(self, batch: List[Dict[str, Any]]):
-        if self.output_callback and batch:
-            await self.output_callback({"items": batch}) 
+        if not batch:
+            return
+        if self.stream_writer is not None:
+            await self.stream_writer.write({"items": batch})
+        elif self.output_callback:
+            await self.output_callback({"items": batch})
 
     async def _flush_remaining_batches(self):
         async with self.data_lock:
@@ -443,15 +806,25 @@ class ScraperEngine:
         if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)): return
 
         session_to_close = None
-        
+
         async with self._auth_lock:
             if self.auth_token and datetime.now() < (self.token_expires_at - timedelta(seconds=60)):
                 return
 
+            token_url = str(auth_config.token_url) if auth_config.token_url else ""
+            if not token_url:
+                raise AuthError(token_url, "oauth_password requires a token_url")
+            # Validate the token endpoint against the URL policy before the request.
+            try:
+                token_url = self.url_policy.validate(token_url)
+            except Exception as exc:
+                from engine.errors import classify_exception
+                raise AuthError(token_url, f"token URL rejected by policy: {exc}", cause=exc)
+
             logger.info(f"🔄 Refreshing OAuth Token for {auth_config.type}...")
-            
+
             if not self.session: self._init_session()
-            if not self.session: raise RuntimeError("Failed to initialize session")
+            if not self.session: raise AuthError(token_url, "Failed to initialize session")
 
             try:
                 if auth_config.type == "oauth_password":
@@ -466,13 +839,23 @@ class ScraperEngine:
                     current_proxy = self._get_next_proxy()
                     proxies = {"http": current_proxy, "https": current_proxy} if current_proxy else None
 
-                    response = await self.session.post(
-                        str(auth_config.token_url),
-                        auth=(client_id, client_secret),
-                        data=payload,
-                        proxies=cast(Any, proxies)
+                    token_headers = self.url_policy.headers_for(
+                        token_url,
+                        parent_url=None,
+                        configured={},
                     )
-                    
+                    token_headers["User-Agent"] = self.ua_rotator.random
+                    token_headers["Accept"] = "application/json"
+
+                    async with self.rate_limiter:
+                        response = await self.session.post(
+                            token_url,
+                            auth=(client_id, client_secret),
+                            data=payload,
+                            proxies=cast(Any, proxies),
+                            headers=token_headers,
+                        )
+
                     if response.status_code == 200:
                         data = response.json()
                         self.auth_token = data.get("access_token")
@@ -481,8 +864,10 @@ class ScraperEngine:
                         logger.success(f"✅ Token Refreshed! Expires in {expires_in}s")
                     else:
                         logger.error(f"❌ Auth Failed: {response.status_code} - {response.text}")
-                        raise Exception("Authentication Failed")
-                        
+                        raise AuthError(token_url, f"token endpoint returned {response.status_code}")
+
+            except AuthError:
+                raise
             except Exception as e:
                 logger.error(f"Auth Error: {e}")
                 # Close session outside lock to prevent race conditions
@@ -490,49 +875,193 @@ class ScraperEngine:
                 self.session = None
                 if session_to_close:
                     await session_to_close.close()
-                raise e
+                raise AuthError(token_url, str(e), cause=e)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
-    async def _fetch_page(self, url: str) -> str:
-        if self.config.authentication:
-            await self.ensure_active_token()
+    async def _fetch_page(
+        self,
+        url: str,
+        purpose: RequestPurpose = RequestPurpose.ROOT,
+        parent_url: Optional[str] = None,
+    ) -> FetchResult:
+        """Fetch a URL with policy validation and status-aware retries.
 
-        headers = self.config.headers.copy() if self.config.headers else {}
-        headers["User-Agent"] = self.ua_rotator.random
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
+        Returns a FetchResult; on final failure the result carries ``error``
+        (a classified FetchError) instead of raising. Redirects are followed
+        manually and each hop is policy-validated; a blocked hop aborts the
+        chain with a POLICY error (never retried).
+        """
+        current_url = self.url_policy.validate(url, parent_url=parent_url)
+        requested_url = current_url
+        redirect_chain: List[str] = []
+        started = time.perf_counter()
+        retry_config = self.config.retry
 
-        current_proxy = self._get_next_proxy()
-        
-        if self.browser_manager:
-            return await self.browser_manager.fetch_page(url, headers=headers)
-        else:
-            if not self.session: raise RuntimeError("Session not initialized")
+        def _failed(error: FetchError) -> FetchResult:
+            return FetchResult(
+                content="",
+                requested_url=requested_url,
+                final_url=current_url,
+                status_code=error.status_code or 0,
+                attempts=error.attempts,
+                redirect_chain=redirect_chain,
+                error=error,
+            )
+
+        for attempt in range(1, retry_config.max_attempts + 1):
+            if self.config.authentication:
+                try:
+                    await self.ensure_active_token()
+                except Exception as exc:
+                    from engine.errors import classify_exception
+                    category = classify_exception(exc)
+                    return _failed(FetchError(
+                        category,
+                        current_url,
+                        str(exc),
+                        cause=exc,
+                        attempts=attempt,
+                    ))
+            headers = self.url_policy.headers_for(
+                current_url,
+                parent_url=parent_url,
+                configured=self.config.headers,
+                bearer_token=self.auth_token,
+            )
+            headers["User-Agent"] = self.ua_rotator.random
+            current_proxy = self._get_next_proxy()
+
             try:
-                proxies: Any = {"http": current_proxy, "https": current_proxy} if current_proxy else None
-                
-                # Cast to Any because Pylance misidentifies AsyncSession.get return type as Never
-                session: Any = self.session
-                
-                response = await session.get(
-                    url, 
-                    timeout=self.config.request_timeout, 
-                    proxies=proxies, 
-                    headers=headers
+                if self.browser_manager:
+                    result = await self.browser_manager.fetch_page(
+                        current_url,
+                        headers=headers,
+                        proxy=current_proxy,
+                        worker_id=0,
+                    )
+                    result.requested_url = requested_url
+                    result.redirect_chain = redirect_chain
+                    result.attempts = attempt
+                    try:
+                        self.url_policy.validate(result.final_url, parent_url=parent_url)
+                    except Exception as exc:
+                        from engine.errors import classify_exception
+                        return _failed(FetchError(
+                            classify_exception(exc),
+                            result.final_url,
+                            "redirect target blocked",
+                            cause=exc,
+                            attempts=attempt,
+                        ))
+                    return result
+
+                if not self.session:
+                    raise RuntimeError("Session not initialized")
+                proxies: Any = (
+                    {"http": current_proxy, "https": current_proxy}
+                    if current_proxy
+                    else None
                 )
-                if response.status_code == 200:
-                    return response.text
-                elif response.status_code in [403, 429, 401]:
-                    raise Exception(f"Blocked/Auth Error: {response.status_code}")
-                else:
-                    return ""
+                session: Any = self.session
+                response = await session.get(
+                    current_url,
+                    timeout=self.config.request_timeout,
+                    proxies=proxies,
+                    headers=headers,
+                    allow_redirects=False,
+                )
+                status = int(response.status_code)
+                response_headers = {str(k): str(v) for k, v in response.headers.items()}
+
+                if status in {301, 302, 303, 307, 308}:
+                    # Follow redirects within this attempt; each hop is
+                    # policy-validated. A blocked hop aborts the chain.
+                    while True:
+                        location = response_headers.get("location")
+                        if not location or len(redirect_chain) >= self.config.url_policy.max_redirects:
+                            error = HttpStatusError(status, current_url, "Redirect limit or missing Location")
+                            return _failed(error.to_fetch_error(attempts=attempt))
+                        try:
+                            next_url = resolve_url(current_url, location)
+                            next_url = self.url_policy.validate(next_url, parent_url=current_url)
+                        except Exception as exc:
+                            # A redirect hop that violates policy aborts the whole
+                            # chain — never follow, never retry.
+                            from engine.errors import classify_exception
+                            redirect_error = FetchError(
+                                classify_exception(exc),
+                                current_url,
+                                f"redirect target blocked: {exc}",
+                                cause=exc,
+                                attempts=attempt,
+                            )
+                            return _failed(redirect_error)
+                        redirect_chain.append(next_url)
+                        current_url = next_url
+                        # Re-fetch the redirect target within the same attempt.
+                        response = await session.get(
+                            current_url,
+                            timeout=self.config.request_timeout,
+                            proxies=proxies,
+                            headers=headers,
+                            allow_redirects=False,
+                        )
+                        status = int(response.status_code)
+                        response_headers = {str(k): str(v) for k, v in response.headers.items()}
+                        if status not in {301, 302, 303, 307, 308}:
+                            break
+
+                if 200 <= status < 300:
+                    if redirect_chain and redirect_chain[-1] != current_url:
+                        redirect_chain.append(current_url)
+                    return FetchResult(
+                        content=response.text,
+                        requested_url=requested_url,
+                        final_url=current_url,
+                        status_code=status,
+                        headers=response_headers,
+                        elapsed_ms=(time.perf_counter() - started) * 1000,
+                        attempts=attempt,
+                        redirect_chain=redirect_chain,
+                    )
+
+                error = HttpStatusError(status, current_url)
+                retry_after = retry_after_seconds(
+                    response_headers.get("retry-after"),
+                    retry_config.retry_after_cap_seconds,
+                )
+                if not is_retryable_status(status, retry_config) or attempt >= retry_config.max_attempts:
+                    # 429 with a Retry-After we already honored at max attempts
+                    # is a rate-limit failure; anything else non-retryable is HTTP.
+                    category = ErrorCategory.RATE_LIMIT if status == 429 else ErrorCategory.HTTP
+                    return _failed(FetchError(
+                        category,
+                        current_url,
+                        str(error),
+                        status_code=status,
+                        retry_after=retry_after,
+                        cause=error,
+                        attempts=attempt,
+                    ))
+                await asyncio.sleep(retry_after if retry_after is not None else backoff_seconds(attempt, retry_config))
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.warning(f"Network Error: {e}")
-                raise e
+            except FetchError as exc:
+                # Already classified (e.g. POLICY from a nested policy call).
+                if not exc.retryable or attempt >= retry_config.max_attempts:
+                    return _failed(exc)
+                await asyncio.sleep(backoff_seconds(attempt, retry_config))
+            except Exception as exc:
+                from engine.errors import classify_exception
+                category = classify_exception(exc)
+                if category in NON_RETRYABLE_CATEGORIES or attempt >= retry_config.max_attempts:
+                    return _failed(FetchError(
+                        category,
+                        current_url,
+                        str(exc),
+                        cause=exc,
+                        attempts=attempt,
+                    ))
+                logger.warning(f"Network Error ({purpose.value}): {exc}")
+                await asyncio.sleep(backoff_seconds(attempt, retry_config))
+
+        raise RuntimeError(f"Unable to fetch {requested_url}")

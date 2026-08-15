@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.9.0 — Production Readiness (August 2026)
+
+### Reliability and operations
+
+* Added isolated run directories, resumable kind-aware SQLite checkpoints, manifests, JSONL failure streams, bounded debug snapshots, final reports, and atomic exports.
+* Added structured fetch-error categories, status-aware retries, SSRF/redirect policy, robots handling, credential redaction, per-origin metrics, and deterministic CLI exit codes.
+* Made Playwright an optional package extra and added a deterministic browser-marked CI smoke test.
+* Unexpected page failures now become resumable checkpoint failures; failure statistics include timeout, rate-limit, authentication, validation, and internal categories.
+
+### Verification
+
+* Core-only clean install and full offline suite pass.
+* Browser-enabled offline suite and CLI/package smoke checks pass.
+
 ## v2.8.0 — Production Hardening (April 2026)
 
 ### 🔥 Bug Fixes

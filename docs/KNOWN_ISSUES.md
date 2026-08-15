@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-This document lists confirmed design limitations and not-yet-implemented features in the current release (v2.8).  Resolved bugs from earlier releases have been removed.
+This document lists confirmed design limitations and not-yet-implemented features in the current release (v2.9). Resolved bugs from earlier releases have been removed.
 
 ---
 

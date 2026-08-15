@@ -2,7 +2,14 @@ import asyncio
 import json
 import time
 from typing import Optional, Any, Callable, Awaitable, Dict, List
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+
+try:
+    from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+except ImportError:  # pragma: no cover - exercised by core-only installs
+    async_playwright = None
+    Page = Any
+    Browser = Any
+    BrowserContext = Any
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from fake_useragent import UserAgent
@@ -42,6 +49,11 @@ class BrowserManager:
     
     async def start(self, proxy: Optional[str] = None):
         if self.playwright: return
+
+        if async_playwright is None:
+            raise RuntimeError(
+                "Playwright support is not installed; install glider[browser] to enable browser scraping"
+            )
         
         self.playwright = await async_playwright().start()
         

@@ -34,6 +34,7 @@ from engine.network import (
     retry_after_seconds,
 )
 from engine.errors import AuthError, ErrorCategory, FetchError, NON_RETRYABLE_CATEGORIES
+from engine.redact import redact_text
 from engine.robots import RobotsCache
 from engine.run import RunContext
 
@@ -94,6 +95,7 @@ class ScraperEngine:
         self.child_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
         self._child_inflight: Dict[str, asyncio.Future] = {}
         self.depth_first_seen: Dict[str, int] = {}
+        self._failure_tasks: set[asyncio.Task] = set()
         from engine.metrics import MetricsCollector
         self.metrics = MetricsCollector()
 
@@ -184,6 +186,8 @@ class ScraperEngine:
         )
 
     async def _cleanup_resources(self):
+        if self._failure_tasks:
+            await asyncio.gather(*self._failure_tasks, return_exceptions=True)
         if not self.dry_run:
             try: self.seen_hashes.save(self.bloom_path)
             except Exception: pass
@@ -279,14 +283,16 @@ class ScraperEngine:
         self.failed_urls.append(url)
         from datetime import datetime as _dt
         entry = {
-            "url": url,
+            "url": redact_text(url),
             "category": getattr(error, "category", ErrorCategory.INTERNAL).value,
-            "message": str(error)[:200],
+            "message": redact_text(str(error))[:200],
             "timestamp": _dt.utcnow().isoformat() + "Z",
         }
         self.failures_ring.append(entry)
         if self.run_context:
-            asyncio.ensure_future(self.run_context.append_failure(entry))
+            task = asyncio.create_task(self.run_context.append_failure(entry))
+            self._failure_tasks.add(task)
+            task.add_done_callback(self._failure_tasks.discard)
 
     def _record_sample(
         self,
@@ -376,6 +382,7 @@ class ScraperEngine:
                 logger.error(f"Failed {url}: {e}")
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, url)
+                await self.checkpoint.mark_failed(url, kind="root", error=ErrorCategory.INTERNAL.value)
                 self._record_failure(url, e)
                 self._record_sample(origin(url), "root", 0, 0.0, 1, "internal_error", url)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
@@ -428,6 +435,7 @@ class ScraperEngine:
                 break
             logger.info(f"📄 Page {pages + 1}: {current_url}")
             await self.checkpoint.mark_in_progress(current_url, kind="pagination")
+            content = ""
             
             try:
                 async with self.rate_limiter:
@@ -470,6 +478,10 @@ class ScraperEngine:
                 logger.error(f"Page failed: {e}")
                 if 'content' in locals() and content:
                     await self._save_debug_snapshot(content, current_url)
+                await self.checkpoint.mark_failed(
+                    current_url, kind="pagination", error=ErrorCategory.INTERNAL.value
+                )
+                self._record_failure(current_url, e)
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
                 break
 
@@ -670,7 +682,7 @@ class ScraperEngine:
                 body = body[:snap_config.max_bytes_per_file] + "\n<!-- truncated -->\n"
 
             async with aiofiles.open(filename, "w", encoding="utf-8") as f:
-                await f.write(f"<!-- Failed URL: {url} -->\n")
+                await f.write(f"<!-- Failed URL: {redact_text(url)} -->\n")
                 await f.write(body)
             logger.warning(f"📸 Snapshot saved: {filename}")
 

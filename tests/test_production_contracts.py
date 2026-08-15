@@ -1,9 +1,12 @@
 import pytest
 
 from engine.resolver import HtmlResolver, JsonResolver, ResolverParseError
-from engine.schemas import DataField, ScraperConfig, Selector, SelectorType
+from engine.checkpoint import CheckpointManager
+from engine.schemas import DataField, ScraperConfig, Selector, SelectorType, UrlPolicyConfig
 from engine.scraper import ScraperEngine
 from engine.validation import validate_config_data
+from engine.schemas import StatsEvent
+from main import ScrapeStats
 
 
 def test_invalid_json_is_a_parse_failure():
@@ -176,3 +179,35 @@ async def test_soft_mode_warns_but_continues(tmp_path):
     engine = ScraperEngine(config)
     engine.bloom_path = tmp_path / "b.bloom"
     assert engine._validate_extraction({"books": [{"t": "one"}]}) is None  # soft mode
+
+
+def test_scrape_stats_counts_all_failure_categories():
+    stats = ScrapeStats()
+    for category in ("timeout", "rate_limit", "auth_error", "validation_error", "internal_error"):
+        stats.update(StatsEvent(category))
+    assert stats.failed == 5
+
+
+@pytest.mark.asyncio
+async def test_unexpected_root_error_is_resumable(tmp_path):
+    config = ScraperConfig(
+        name="resume-error",
+        mode="list",
+        start_urls=["https://site.com/root"],
+        fields=[],
+        url_policy=UrlPolicyConfig(resolve_dns=False),
+    )
+    engine = ScraperEngine(config)
+    engine.checkpoint = CheckpointManager("resume-error", True, tmp_path / "checkpoint.sqlite")
+    await engine.checkpoint.initialize()
+
+    async def fail_fetch(*args, **kwargs):
+        raise RuntimeError("unexpected failure")
+
+    engine._fetch_page = fail_fetch  # type: ignore[method-assign]
+    try:
+        await engine._process_url("https://site.com/root")
+        items = await engine.checkpoint.get_incomplete_items(kind="root")
+        assert items[0]["url"] == "https://site.com/root"
+    finally:
+        await engine.checkpoint.close()

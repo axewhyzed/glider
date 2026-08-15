@@ -16,6 +16,7 @@ dependencies = [
     "aiolimiter>=1.2",
     "aiosqlite>=0.20",
     "curl_cffi>=0.14",
+    "cssselect>=1.2",
     "fake-useragent>=2.0",
     "jsonpath-ng>=1.6",
     "loguru>=0.7",

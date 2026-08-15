@@ -60,7 +60,26 @@ async def test_failures_redact_auth_secrets(tmp_path):
     # The message is truncated to 200 chars; the secret substring is still
     # present in the URL — redaction of URLs happens at P9.4. Here we assert
     # the message field is bounded (no unbounded error text).
-    assert len(json.loads(content.strip().splitlines()[0])["message"]) <= 200
+    entry = json.loads(content.strip().splitlines()[0])
+    assert len(entry["message"]) <= 200
+    assert "supersecret" not in content
+
+
+async def test_snapshot_redacts_query_credentials(tmp_path):
+    config = ScraperConfig(
+        name="snap",
+        base_url="https://example.com",
+        fields=[],
+    )
+    engine = ScraperEngine(config)
+    engine.run_context = RunContext.create("snap", {"name": "snap"}, output_root=tmp_path)
+    await engine._save_debug_snapshot(
+        "<html>boom</html>", "https://example.com/?token=supersecret"
+    )
+    content = next(engine.run_context.debug_directory.glob("fail_*.html")).read_text(
+        encoding="utf-8"
+    )
+    assert "supersecret" not in content
 
 
 async def _drain_tasks():

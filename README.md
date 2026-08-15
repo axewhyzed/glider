@@ -2,7 +2,7 @@
 
 **Glider** is a high-performance, configuration-driven web scraping framework designed for the modern web. It bridges the gap between simple Python scripts and enterprise-grade extraction tools.
 
-Built on **Python 3.9+**, it leverages **AsyncIO**, **Playwright**, and **curl_cffi** to provide a hybrid scraping engine that is fast, stealthy, and scalable — all driven by plain JSON configuration files, no coding required.
+Built on **Python 3.10+**, it leverages **AsyncIO**, **Playwright**, and **curl_cffi** to provide a hybrid scraping engine that is fast, stealthy, and scalable — all driven by plain JSON configuration files, no coding required.
 
 ---
 
@@ -34,12 +34,12 @@ Built on **Python 3.9+**, it leverages **AsyncIO**, **Playwright**, and **curl_c
 * **7 Interaction Types:** `click`, `fill`, `scroll`, `wait`, `press`, `hover`, `key` — composable into sequences.
 * **Smart Waits:** Wait for specific CSS selectors to appear before scraping.
 * **Retry Logic:** Each interaction automatically retried once before failing gracefully.
-* **Context Rotation:** Browser context recycled every 50 requests to prevent memory leaks.
+* **Context Rotation:** Browser context is recycled after the configured request cap (`browser.context_max_requests`) to prevent memory leaks.
 
 ### 📊 Observability & Reliability
 * **Live Dashboard:** Real-time terminal UI (Rich) showing elapsed time, pages, failures, blocks, total entries, and entries/sec.
 * **Checkpointing:** SQLite-backed state manager. Interrupt a 50 k-page scrape and resume exactly where you left off.
-* **Crash-Proof Streaming Writes:** Data streamed line-by-line to `temp_stream.jsonl` before final export. Zero data loss on crash.
+* **Crash-Proof Streaming Writes:** Data streamed line-by-line to a run-scoped `stream.jsonl` before final export. Partial artifacts remain available after interruption.
 * **Micro-Batching:** Pending records flushed every 10 items; remaining records flushed on shutdown.
 * **Ethical Compliance:** Built-in `robots.txt` parser respects site policies when enabled.
 * **Debug Snapshots:** Failed pages auto-saved to `debug/` as HTML for post-mortem inspection.
@@ -503,7 +503,14 @@ glider/
 
 ## 🆕 What's New
 
-### v2.8.0 — Production Hardening (April 2026)
+### v2.9.0 — Production Readiness (August 2026)
+
+* Isolated run directories with resumable SQLite checkpoints, manifests, failure streams, reports, and atomic JSON/CSV exports.
+* Structured error categories, retry/backoff policy, SSRF and credential-scoping protections, robots handling, bounded debug snapshots, and per-origin metrics.
+* Production CLI commands (`validate`, `preview`, and `scrape`) with deterministic exit codes and optional browser support.
+* Core and browser dependencies are separated so `pip install -e ".[dev]"` works without Playwright; browser CI runs a deterministic marked smoke test.
+
+### v2.8.0 — Earlier Production Hardening (April 2026)
 
 #### 🔥 All Remaining Bugs Fixed
 * **JSON API pagination now works with shorthand selectors** (`"data.after"` shorthand no longer silently breaks pagination after page 1).

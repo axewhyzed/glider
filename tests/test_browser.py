@@ -5,6 +5,7 @@ These never launch a real browser; live-browser tests are gated by the
 """
 
 import asyncio
+import sys
 
 import pytest
 
@@ -191,3 +192,27 @@ def test_cancel_during_fetch_closes_page(monkeypatch):
     page_closed = asyncio.run(run())
     assert page_closed is True
     assert manager._active_requests == 0
+
+
+@pytest.mark.browser
+@pytest.mark.asyncio
+async def test_real_browser_data_url_smoke():
+    """Exercise the CI browser gate without depending on an external site."""
+    manager = _make_manager()
+    try:
+        try:
+            await manager.start()
+        except Exception as exc:
+            if "Executable doesn't exist" in str(exc):
+                pytest.skip("Playwright Chromium is not installed")
+            if sys.platform == "win32" and isinstance(exc, NotImplementedError):
+                pytest.skip("Playwright requires the Windows proactor event loop")
+            raise
+
+        result = await manager.fetch_page(
+            "data:text/html,<html><body><h1>Glider browser smoke</h1></body></html>"
+        )
+        assert result.status_code == 200
+        assert "Glider browser smoke" in result.content
+    finally:
+        await manager.close()

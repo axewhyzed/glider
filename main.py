@@ -31,13 +31,25 @@ from engine.writer import JsonlStreamWriter
 app = typer.Typer(no_args_is_help=True)
 console = Console()
 
-# curl_cffi's async layer needs a selector event loop on Windows (the Proactor
-# loop lacks add_reader); install the selector policy before any network work.
-if os.name == "nt":
+def _configure_event_loop(use_playwright: bool = False) -> None:
+    """Choose the Windows loop required by the selected transport.
+
+    curl_cffi needs the selector loop, while Playwright launches a subprocess
+    and therefore needs the proactor loop on Windows.  Configure this before
+    each ``asyncio.run`` so one CLI process can safely execute either mode.
+    """
+    if os.name != "nt":
+        return
     try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        if use_playwright and hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        else:
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except AttributeError:
         pass
+
+
+_configure_event_loop()
 
 
 class ScrapeStats:
@@ -60,6 +72,14 @@ class ScrapeStats:
             self.skipped += event.count
         elif event.event_type in {"blocked", "robots_blocked", "url_policy_blocked"}:
             self.blocked += event.count
+        elif event.event_type in {
+            "timeout",
+            "rate_limit",
+            "auth_error",
+            "validation_error",
+            "internal_error",
+        }:
+            self.failed += event.count
         elif event.event_type == "entries_added":
             self.entries_extracted += event.count
             self._update_rps(event.count)
@@ -216,6 +236,7 @@ def preview(
         _print_validation(result, "text")
         raise typer.Exit(ExitCode.INVALID_INPUT)
     setup_logging()
+    _configure_event_loop(result.config.use_playwright)
     try:
         report = asyncio.run(_run_preview(result.config, url))
     except Exception as exc:
@@ -248,6 +269,7 @@ def scrape(
         raise typer.Exit(ExitCode.INVALID_INPUT)
     config = result.config
     setup_logging(level=log_level)
+    _configure_event_loop(config.use_playwright)
 
     if dry_run:
         try:

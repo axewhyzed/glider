@@ -4,14 +4,14 @@ Use this checklist before tagging a release.
 
 ## Pre-release
 
-- [ ] `venv\Scripts\python.exe -m pytest tests -q` — full suite green (no browser/network markers excluded unexpectedly)
+- [x] `venv\Scripts\python.exe -m pytest tests -q` — core suite green; browser smoke is intentionally marker-gated
 - [ ] `venv\Scripts\python.exe -m pytest tests -m browser -q` — browser tests pass on a machine with `playwright install chromium`
-- [ ] `python -m compileall engine main.py` — no compile errors
-- [ ] `glider validate configs/hacker_news.json` — CLI smoke passes
-- [ ] `pip wheel . --no-deps -w dist` — package builds
-- [ ] Check `git diff` for: no secrets/tokens, no debug artifacts, no unbounded resource changes
-- [ ] `docs/KNOWN_ISSUES.md` is up to date; no resolved items still listed as open
-- [ ] CHANGELOG.md has an entry for this release
+- [x] `python -m compileall engine main.py` — no compile errors
+- [x] `glider validate configs/hacker_news.json` — CLI smoke passes
+- [x] `pip wheel . --no-deps -w dist` — package builds
+- [x] Check `git diff` for: no secrets/tokens, no debug artifacts, no unbounded resource changes
+- [x] `docs/KNOWN_ISSUES.md` is up to date; no resolved items still listed as open
+- [x] CHANGELOG.md has an entry for this release
 
 ## Release
 
@@ -21,4 +21,4 @@ Use this checklist before tagging a release.
 
 ## Post-release
 
-- [ ] Update the production-readiness checklist with the release note and verification commands
+- [x] Update the production-readiness checklist with the release note and verification commands

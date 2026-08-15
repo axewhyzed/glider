@@ -2,6 +2,19 @@
 
 ---
 
+## v3.3.0 to v3.3.1 (August 2026)
+
+This patch is backward-compatible for benchmark callers and scraper
+configurations.
+
+* Use `workload_size` in the benchmark Python API and
+  `--workload-size` on the command line.
+* Existing `pages=` calls, `--pages` commands, and the `pages` output field
+  continue to work as compatibility aliases.
+* Benchmark-generated configuration names are now stable across releases.
+
+---
+
 ## v3.2.1 to v3.3.0 (August 2026)
 
 This release is backward-compatible for scraper configurations.

@@ -23,7 +23,7 @@ For a deterministic end-to-end run without external network access, use the
 local fixture benchmark:
 
 ```powershell
-venv\Scripts\python.exe -m benchmarks.local --pages 100 --concurrency 10 --repeats 3
+venv\Scripts\python.exe -m benchmarks.local --workload-size 100 --concurrency 10 --repeats 3
 ```
 
 The command runs list, pagination, JSON, and nested-link scenarios separately.

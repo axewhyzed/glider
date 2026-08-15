@@ -74,3 +74,11 @@ changing the core configuration contract.
 Release implementation commit: `971761f732cd1af8359e9f6a573ae21db13609b7`.
 Post-release checklist documentation is kept in a separate commit so the tag
 continues to identify the reviewed implementation.
+
+## v3.3.1 benchmark cleanup
+
+- [x] Remove release-number coupling from benchmark configuration names.
+- [x] Use `workload_size` as the documented benchmark input while preserving
+  `pages` compatibility aliases and output.
+- [x] Add regression coverage for canonical and legacy benchmark APIs.
+- [ ] Complete release verification, tag `v3.3.1`, and push the patch.

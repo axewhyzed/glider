@@ -543,6 +543,11 @@ glider/
 * Improved the first-run example workflow with copy, validate, and scrape
   instructions.
 
+### v3.3.1 — Benchmark terminology
+
+* Benchmark sizing is documented as `workload_size`; the legacy `pages` alias
+  remains supported for existing scripts.
+
 ### v3.2.0 — Usage and developer workflow
 
 * Deterministic local HTTP validation for HTML pagination, JSON APIs, nested

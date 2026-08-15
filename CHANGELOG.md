@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.3.1 - Benchmark naming and workload terminology (August 2026)
+
+### Improvements
+
+* Use stable benchmark configuration names that do not need to change with
+  every release.
+* Rename the documented benchmark size concept to `workload_size`, with
+  scenario-specific semantics for independent URLs, pagination pages, and
+  nested child records.
+* Keep `pages=` and `--pages` as compatibility aliases, and retain the legacy
+  `pages` output field for existing benchmark consumers.
+
 ## v3.3.0 - Usage benchmark matrix and browser validation (August 2026)
 
 ### Fixes

@@ -115,3 +115,13 @@ def test_local_benchmark_usage_matrix():
         scenario["runs"][0]["failed_pages"] == 0
         for scenario in result["scenarios"].values()
     )
+
+
+def test_local_benchmark_workload_size_and_legacy_aliases():
+    from benchmarks.local import _config, run_benchmark, run_scenario
+
+    assert _config("http://127.0.0.1:1", "list", 2, 1).name == "local_list_benchmark"
+    canonical = run_scenario("list", workload_size=2, concurrency=1, repeats=1)
+    legacy = run_benchmark(pages=2, concurrency=1, repeats=1)
+    assert canonical["workload_size"] == canonical["pages"] == 2
+    assert legacy["workload_size"] == legacy["pages"] == 2

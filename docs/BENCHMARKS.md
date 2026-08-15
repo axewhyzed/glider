@@ -8,7 +8,7 @@ list-mode workers, batching, and output callback.
 Run it with:
 
 ```powershell
-venv\Scripts\python.exe -m benchmarks.local --pages 100 --concurrency 10 --repeats 3
+venv\Scripts\python.exe -m benchmarks.local --workload-size 100 --concurrency 10 --repeats 3
 ```
 
 The default JSON output contains separate measurements for list extraction,
@@ -24,8 +24,12 @@ policy exception in its benchmark configuration.
 Measure one path when investigating a regression:
 
 ```powershell
-venv\Scripts\python.exe -m benchmarks.local --scenario pagination --pages 100 --concurrency 10 --repeats 3
+venv\Scripts\python.exe -m benchmarks.local --scenario pagination --workload-size 100 --concurrency 10 --repeats 3
 ```
+
+`--pages` remains a command-line compatibility alias for
+`--workload-size`. The stable Python API and output use `workload_size`; the
+legacy `pages` output key is retained for consumers of v3.3.
 
 The end-to-end fixture tests run in the normal suite:
 
@@ -53,7 +57,9 @@ site.
 
 ## Suggested comparison matrix
 
-Start with `pages=1000` and compare concurrency `1`, `5`, `10`, and `25`.
+Start with `workload_size=1000` and compare concurrency `1`, `5`, `10`, and
+`25`. The workload size means independent URLs for `list` and `json`, maximum
+pagination pages for `pagination`, and catalog child count for `nested`.
 Measure at least three repeats after one warm-up run. Watch both throughput and
 memory: increasing concurrency should not be accepted as an improvement if it
 causes unstable failure rates or excessive memory growth.

@@ -1,6 +1,9 @@
 # Known Issues & Limitations
 
-This document lists intentional limitations in Glider v3.1.0. Resolved v3 transport, checkpoint, security, and export bugs are not listed here.
+This document lists intentional limitations in Glider v3.3.1. Resolved v3
+transport, checkpoint, security, export, browser-validation, and benchmark
+workflow bugs are not listed here. See [`docs/RELEASES.md`](RELEASES.md) for
+the recommended release and historical-tag policy.
 
 ## Design limitations
 

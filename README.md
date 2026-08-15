@@ -116,6 +116,12 @@ guidance, [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow,
 and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the security boundaries
 and residual risks.
 
+### Release status
+
+The recommended release for new deployments is **v3.3.1**. Published older
+tags remain available for reproducibility but are superseded; see
+[`docs/RELEASES.md`](docs/RELEASES.md) for release status and upgrade guidance.
+
 ---
 
 ## 🚀 Quick Start
@@ -525,7 +531,7 @@ glider/
 ├── tests/                      # Pytest unit and integration tests
 ├── main.py                     # CLI entry point & live dashboard
 ├── CHANGELOG.md                # Detailed version history
-├── UPGRADE_GUIDE.md            # Migration guides (v2.5 → v2.6, v2.7 → v2.8)
+├── UPGRADE_GUIDE.md            # Version migration and compatibility guides
 ├── pytest.ini                  # Test configuration
 └── requirements.txt            # Python dependencies
 ```

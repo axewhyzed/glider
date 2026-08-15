@@ -1,5 +1,9 @@
 # Changelog
 
+The recommended release for new deployments is **v3.3.1**. Older tags remain
+available for reproducibility but are superseded; see
+[`docs/RELEASES.md`](docs/RELEASES.md).
+
 ## v3.3.1 - Benchmark naming and workload terminology (August 2026)
 
 ### Improvements

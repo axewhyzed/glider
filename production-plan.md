@@ -1,6 +1,7 @@
 # Glider v3.1.0 Production Readiness Plan
 
-Status: complete pending commit, annotated tag, and remote push.
+Status: complete. Release commit `96b39dd7ec7d61b28a62adfd5c7a611eeb6c6ed8`
+and annotated tag `v3.1.0` are pushed to GitHub.
 
 ## Review and implementation checklist
 
@@ -39,8 +40,8 @@ Status: complete pending commit, annotated tag, and remote push.
 
 ## Release handoff
 
-- [ ] Commit the reviewed changes as the v3.1.0 release.
-- [ ] Create annotated tag `v3.1.0`.
-- [ ] Push `main` and the tag with `git push origin main --follow-tags`.
-- [ ] Run `verify_release.py --version 3.1.0` after the push and record the
-  remote commit/tag verification.
+- [x] Commit the reviewed changes as the v3.1.0 release.
+- [x] Create annotated tag `v3.1.0`.
+- [x] Push `main` and the tag with `git push origin main --follow-tags`.
+- [x] `verify_release.py --version 3.1.0` passed: local and remote `main` and
+  `v3.1.0` resolve to `96b39dd7ec7d61b28a62adfd5c7a611eeb6c6ed8`.

@@ -20,6 +20,7 @@
 
 ## Post-release
 
-- [ ] Run `venv\Scripts\python.exe verify_release.py --version 3.1.0`.
-- [ ] Verify GitHub shows tag `v3.1.0` and the release commit.
-- [ ] Record the final commit/tag and remote verification here.
+- [x] Run `venv\Scripts\python.exe verify_release.py --version 3.1.0`.
+- [x] Verify GitHub shows tag `v3.1.0` and the release commit.
+- [x] Remote `main` and `v3.1.0` resolve to
+  `96b39dd7ec7d61b28a62adfd5c7a611eeb6c6ed8`.

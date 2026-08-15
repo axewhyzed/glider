@@ -50,6 +50,20 @@ class BrowserManager:
         self._context_lock = asyncio.Lock()
         self._active_requests = 0
         self._context_proxy: Optional[str] = None
+
+    @property
+    def current_proxy(self) -> Optional[str]:
+        """Proxy actually attached to the shared browser context."""
+        return self._context_proxy
+
+    @property
+    def context_rotation_due(self) -> bool:
+        """Whether the next shared fetch will rotate the context."""
+        return (
+            self.config.browser.proxy_rotation == "per_context"
+            and self._active_requests == 0
+            and self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
+        )
     
     async def start(self, proxy: Optional[str] = None):
         if self.playwright: return
@@ -192,7 +206,7 @@ class BrowserManager:
                 await stealth_async(page)
             
             # Navigate — use the configured request_timeout (converted from seconds to ms)
-            nav_timeout_ms = (self.config.request_timeout or 30) * 1000
+            nav_timeout_ms = self.config.request_timeout * 1000
             await page.goto(url, timeout=nav_timeout_ms, wait_until="domcontentloaded")
             
             # Handle Interactions
@@ -346,7 +360,7 @@ class BrowserManager:
             if stealth_async:
                 await stealth_async(page)
 
-            nav_timeout_ms = (self.config.request_timeout or 30) * 1000
+            nav_timeout_ms = self.config.request_timeout * 1000
             goto_options: Dict[str, Any] = {
                 "timeout": nav_timeout_ms,
                 "wait_until": "domcontentloaded",
@@ -409,6 +423,14 @@ class BrowserManager:
                 await self._execute_interaction(page, action)
             except Exception as e:
                 logger.warning(f"Interaction failed ({action.type}): {e}")
+                if self.config.interaction_failure_policy == "fail":
+                    from engine.errors import ErrorCategory, FetchError
+                    raise FetchError(
+                        ErrorCategory.INTERACTION,
+                        page.url or "",
+                        f"required interaction '{action.type.value}' failed: {e}",
+                        cause=e,
+                    ) from e
 
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
     async def _execute_interaction(self, page: Page, action):

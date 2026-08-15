@@ -99,6 +99,10 @@ class MetricsCollector:
         self.domains: Dict[str, DomainCounters] = defaultdict(DomainCounters)
         self.duplicates_detected = 0
         self.latency = Histogram()
+        self.events: Counter = Counter()
+
+    def record_event(self, name: str, count: int = 1) -> None:
+        self.events[name] += count
 
     def record(self, sample: RequestSample) -> None:
         dc = self.domains[sample.origin]
@@ -130,5 +134,6 @@ class MetricsCollector:
         return {
             "domains": domains,
             "duplicates_detected": self.duplicates_detected,
+            "events": dict(self.events),
             "latency_ms": self.latency.snapshot(),
         }

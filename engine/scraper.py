@@ -153,11 +153,13 @@ class ScraperEngine:
             if self.config.respect_robots_txt and self.config.base_url:
                 await self._init_robots_txt()
 
-            incomplete_urls = await self.checkpoint.get_incomplete(
-                kind="root" if self.config.mode == ScrapeMode.LIST else "pagination"
-            )
+            resume_kind = "root" if self.config.mode == ScrapeMode.LIST else "pagination"
+            incomplete_urls = await self.checkpoint.get_incomplete(kind=resume_kind)
             if incomplete_urls:
-                incomplete_urls = [u for u in incomplete_urls if not self.checkpoint.is_done(u)]
+                incomplete_urls = [
+                    u for u in incomplete_urls
+                    if not self.checkpoint.is_done(u, kind=resume_kind)
+                ]
 
             if self.config.mode == ScrapeMode.LIST:
                 await self._run_list_mode(incomplete_urls)
@@ -274,6 +276,25 @@ class ScraperEngine:
         return next(self.proxy_pool) if self.proxy_pool else None
 
     async def _get_healthy_proxy(self) -> Tuple[Optional[str], Optional[ProxyLease]]:
+        if (
+            self.browser_manager
+            and self.config.browser.proxy_rotation == "per_context"
+            and not self.browser_manager.context_rotation_due
+            and self.browser_manager.current_proxy
+        ):
+            actual_proxy = self.browser_manager.current_proxy
+            if self.proxy_health:
+                # A shared context cannot change proxy mid-life. If its
+                # circuit is currently open, use the existing context without
+                # attributing the outcome to a different proxy; rotation will
+                # select a healthy proxy at the next safe boundary.
+                lease = await self.proxy_health.try_acquire(actual_proxy)
+                if lease is not None:
+                    return actual_proxy, lease
+                logger.warning(
+                    "Current browser context proxy is circuit-open; preserving context identity until rotation"
+                )
+            return actual_proxy, None
         if not self.proxy_health or not self.proxy_values:
             return self._get_next_proxy(), None
         for _ in range(len(self.proxy_values)):
@@ -300,6 +321,8 @@ class ScraperEngine:
             self.robots_cache = RobotsCache(
                 self._fetch_page,
                 ttl_seconds=self.config.robots_ttl_seconds,
+                failure_policy=self.config.robots_failure_policy,
+                max_origins=self.config.robots_max_origins,
             )
         if self.config.base_url:
             await self.robots_cache.can_fetch(str(self.config.base_url))
@@ -803,11 +826,13 @@ class ScraperEngine:
 
                 data[field.name] = nested_results_list
                 if nested_failures:
-                    raise FetchError(
-                        ErrorCategory.NESTED,
-                        url,
-                        f"{len(nested_failures)} nested child request(s) failed",
-                    )
+                    message = f"{len(nested_failures)} nested child request(s) failed"
+                    if self.config.fail_parent_on_nested_error:
+                        raise FetchError(ErrorCategory.NESTED, url, message)
+                    logger.warning(f"{message}; emitting partial nested data for {url}")
+                    self.metrics.record_event("nested_partial")
+                    if self.stats_callback:
+                        self.stats_callback(StatsEvent("nested_partial"))
             else:
                 data[field.name] = extracted_value
         return data, resolver

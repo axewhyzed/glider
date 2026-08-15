@@ -62,6 +62,8 @@ class ScrapeStats:
         self.start_time = datetime.now()
         self.last_update = datetime.now()
         self.rps_samples: list[float] = []
+        self.metrics_snapshot: Dict[str, Any] = {}
+        self.failures_ring: Any = []
 
     def update(self, event: StatsEvent):
         if event.event_type == "page_success":
@@ -78,6 +80,7 @@ class ScrapeStats:
             "auth_error",
             "validation_error",
             "nested_error",
+            "interaction_error",
             "internal_error",
         }:
             self.failed += event.count
@@ -171,6 +174,8 @@ async def main_async(
             except asyncio.CancelledError:
                 pass
     stats.metrics_snapshot = engine.metrics.snapshot()  # type: ignore[attr-defined]
+    if engine.proxy_health:
+        stats.metrics_snapshot["proxies"] = await engine.proxy_health.snapshot()
     stats.failures_ring = engine.failures_ring  # type: ignore[attr-defined]
     return stats
 

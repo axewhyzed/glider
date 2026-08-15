@@ -24,13 +24,15 @@ class ErrorCategory(str, Enum):
     POLICY = "url_policy_blocked"   # SSRF/URL policy refused the request
     VALIDATION = "validation_error"  # extraction validation failed (P6.2)
     NESTED = "nested_error"         # required child extraction failed
+    INTERACTION = "interaction_error"  # required browser interaction failed
     INTERNAL = "internal_error"     # programmer error / unexpected exception
 
 
 # Categories that must NEVER be retried (a retry cannot heal them).
 NON_RETRYABLE_CATEGORIES = frozenset(
      {ErrorCategory.PARSE, ErrorCategory.ROBOTS, ErrorCategory.AUTH,
-     ErrorCategory.POLICY, ErrorCategory.VALIDATION, ErrorCategory.INTERNAL}
+     ErrorCategory.POLICY, ErrorCategory.VALIDATION, ErrorCategory.INTERNAL,
+     ErrorCategory.INTERACTION}
 )
 
 

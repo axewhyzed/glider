@@ -87,6 +87,8 @@ Defaults are deny-by-default: same-origin traversal only, private networks block
 - Bearer tokens are injected only same-origin.
 - Browser cookies are scoped to `base_url`; domain-less cookies are refused.
 - The manifest stores a redacted copy of the config (digest still hashes the raw config).
+- `interaction_failure_policy=fail` makes a failed browser action a resumable page failure; `warn` keeps the compatibility behavior.
+- `robots_failure_policy=allow|deny` controls whether an unavailable or malformed robots file permits crawling. Robots origin state is bounded by `robots_max_origins`.
 
 ## Failure semantics
 
@@ -94,3 +96,4 @@ Defaults are deny-by-default: same-origin traversal only, private networks block
 - Failed items (`status='failed'`) are resumable on the next run.
 - A run with failures exits 4; `manifest.json` records `failed_count` and the report lists a capped preview of failed URLs.
 - Debug snapshots are bounded by `debug_snapshots` (`max_files`, `max_bytes_per_file`, `max_total_bytes`).
+- With `fail_parent_on_nested_error=true`, any required child failure keeps the parent resumable; with `false`, successful child data may be emitted with a partial-nested warning.

@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.0.1 - Follow-up correctness and policy controls (August 2026)
+
+### Fixes
+
+* Bound browser proxy leases to the proxy actually attached to the shared context.
+* Preserved checkpoint kind isolation during resume; malformed ports are now rejected.
+* Validated `request_timeout` and applied the exact value to browser navigation.
+
+### Policy and operations
+
+* Added configurable interaction failure, nested failure, and robots failure policies.
+* Bounded robots origin and lock state.
+* Reconciled configuration, operations, known-issues, and release-checklist documentation.
+
 ## v3.0.0 - Secure transport and production capabilities (August 2026)
 
 ### Correctness and security

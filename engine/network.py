@@ -98,8 +98,8 @@ def canonicalize_url(url: str) -> str:
     scheme = parsed.scheme.lower()
     try:
         port = parsed.port
-    except ValueError:
-        port = None  # e.g. malformed port; treat as absent
+    except ValueError as exc:
+        raise UrlPolicyError(f"Invalid port in URL: {url}") from exc
     default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
     # Rebuild netloc preserving IPv6 brackets.
     if ":" in hostname:

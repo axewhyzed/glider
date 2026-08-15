@@ -108,6 +108,8 @@ def build_final_report(
             "deduplicated": metrics_snapshot.get("duplicates_detected", 0),
         },
         "domains": metrics_snapshot.get("domains", {}),
+        "proxies": metrics_snapshot.get("proxies", {}),
+        "events": metrics_snapshot.get("events", {}),
         "latency_ms": metrics_snapshot.get("latency_ms", {}),
         "error_categories": _aggregate_categories(metrics_snapshot.get("domains", {})),
         "outputs": {},

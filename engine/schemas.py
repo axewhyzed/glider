@@ -226,7 +226,7 @@ class ScraperConfig(BaseModel):
     debug_mode: bool = False
     concurrency: int = 2
     rate_limit: int = 5
-    request_timeout: int = 15
+    request_timeout: int = Field(default=15, ge=1, le=3600)
     min_delay: float = 1
     max_delay: float = 3
     
@@ -236,6 +236,7 @@ class ScraperConfig(BaseModel):
     
     wait_for_selector: Optional[str] = None
     interactions: Optional[List[Interaction]] = Field(default_factory=list)
+    interaction_failure_policy: Literal["warn", "fail"] = "warn"
     proxies: Optional[List[str]] = None
     headers: Optional[Dict[str, str]] = None
     cookies_file: Optional[str] = None 
@@ -245,6 +246,8 @@ class ScraperConfig(BaseModel):
     use_checkpointing: bool = False
     # How long a per-origin robots.txt parse is cached before re-fetching.
     robots_ttl_seconds: float = Field(default=3600.0, ge=0, le=86400)
+    robots_failure_policy: Literal["allow", "deny"] = "allow"
+    robots_max_origins: int = Field(default=1000, ge=1, le=100000)
     # Bounded in-memory failure ring (P7.4); failures are also streamed to disk.
     max_failed_entries: int = Field(default=1000, ge=1, le=100000)
     # Explicit record cardinality for pages containing multiple list fields.
@@ -262,6 +265,7 @@ class ScraperConfig(BaseModel):
     # This is a Reddit-specific convention (e.g. /r/python/comments/xyz/ → .json).
     # Leave False for all other JSON APIs to avoid mangling URLs.
     append_json_suffix: bool = False
+    fail_parent_on_nested_error: bool = True
 
     url_policy: UrlPolicyConfig = Field(default_factory=UrlPolicyConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)

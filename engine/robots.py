@@ -12,6 +12,7 @@ import asyncio
 import time
 import urllib.robotparser
 from dataclasses import dataclass
+from collections import OrderedDict
 from typing import Awaitable, Callable, Dict, Optional
 
 from loguru import logger
@@ -33,12 +34,20 @@ class RobotsCache:
         fetcher: Callable[[str, RequestPurpose, Optional[str]], Awaitable[FetchResult]],
         user_agent: str = "*",
         ttl_seconds: float = 3600.0,
+        failure_policy: str = "allow",
+        max_origins: int = 1000,
     ) -> None:
         self._fetcher = fetcher
         self.user_agent = user_agent
         self.ttl_seconds = ttl_seconds
-        self._entries: Dict[str, _RobotsEntry] = {}
-        self._locks: Dict[str, asyncio.Lock] = {}
+        if failure_policy not in {"allow", "deny"}:
+            raise ValueError("failure_policy must be 'allow' or 'deny'")
+        if max_origins < 1:
+            raise ValueError("max_origins must be at least one")
+        self.failure_policy = failure_policy
+        self.max_origins = max_origins
+        self._entries: "OrderedDict[str, _RobotsEntry]" = OrderedDict()
+        self._locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()
 
     def _entry_for(self, host: str) -> Optional[_RobotsEntry]:
         entry = self._entries.get(host)
@@ -48,7 +57,16 @@ class RobotsCache:
         if self.ttl_seconds == 0 or (time.monotonic() - entry.fetched_at) > self.ttl_seconds:
             self._entries.pop(host, None)
             return None
+        self._entries.move_to_end(host)
         return entry
+
+    def _trim_state(self) -> None:
+        while len(self._entries) > self.max_origins:
+            self._entries.popitem(last=False)
+        for host in list(self._locks):
+            lock = self._locks[host]
+            if host not in self._entries and not lock.locked():
+                del self._locks[host]
 
     async def can_fetch(self, url: str, parent_url: Optional[str] = None) -> bool:
         """Origin-cached robots check. Returns True (allow) on any fetch/parse failure."""
@@ -59,18 +77,24 @@ class RobotsCache:
         if entry is not None:
             return self._allows(entry, url)
 
-        lock = self._locks.setdefault(host, asyncio.Lock())
+        lock = self._locks.get(host)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[host] = lock
+        self._locks.move_to_end(host)
         async with lock:
             entry = self._entry_for(host)
             if entry is not None:
                 return self._allows(entry, url)
             entry = await self._fetch_robots(host, url)
             self._entries[host] = entry
+            self._entries.move_to_end(host)
+            self._trim_state()
         return self._allows(entry, url)
 
     def _allows(self, entry: _RobotsEntry, url: str) -> bool:
         if entry.parser is None:
-            return True  # missing/unparseable robots -> allow-all
+            return self.failure_policy == "allow"
         return entry.parser.can_fetch(self.user_agent, url)
 
     async def _fetch_robots(self, host: str, sample_url: str) -> _RobotsEntry:

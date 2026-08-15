@@ -24,6 +24,12 @@ List mode may use `sitemap_urls` instead of, or in addition to, `start_urls`. Si
 
 For pages with multiple independent list fields, set `record_field` to the primary record collection. Without it, Glider uses the largest list length rather than summing parallel columns.
 
+`interaction_failure_policy` controls browser action failures: `warn` logs and continues (the compatibility default), while `fail` marks the fetch as an `interaction_error` and makes the page resumable.
+
+`fail_parent_on_nested_error` defaults to `true`, preserving strict parent failure semantics. Set it to `false` to emit successful child records while reporting a bounded partial-nested warning.
+
+`robots_failure_policy` controls missing, failed, or malformed robots files: `allow` preserves availability-oriented behavior, while `deny` blocks the affected origin. `robots_max_origins` bounds cached origin state.
+
 Spaces are converted to underscores in filenames (e.g. `"My Scraper"` → `my_scraper_20250101_120000.json`).
 
 ---
@@ -71,7 +77,7 @@ Controls how the HTTP response body is parsed.
 | `"html"` | lxml (via cssselect + XPath) | `css`, `xpath`, `regex` |
 | `"json"` | jsonpath-ng | `json`, `regex` |
 
-> **Note:** When using `response_type: "json"` with `use_playwright: true`, Playwright returns the full HTML page (including `<html>` wrapper) rather than raw JSON. This combination may not parse correctly for most APIs.
+> **Note:** When using `response_type: "json"` with `use_playwright: true`, Glider captures the raw navigation response body. JSON returned later by an XHR/fetch interaction requires an interaction-specific integration.
 
 ---
 
@@ -108,7 +114,7 @@ Maximum number of HTTP requests per second across all workers (enforced globally
 
 ### `request_timeout` — int · Default: `15`
 
-HTTP request timeout in seconds when using `curl_cffi`.  Does not affect Playwright (Playwright's navigation timeout is fixed at 30 s).
+HTTP and browser navigation timeout in seconds. Must be between 1 and 3600 seconds.
 
 ---
 
@@ -187,7 +193,7 @@ When `true`, visited URLs are persisted to a SQLite database (`data/<name>.db`) 
 
 ### `respect_robots_txt` — bool · Default: `false`
 
-When `true`, Glider fetches `robots.txt` from the root of `base_url` at startup and skips any URL disallowed for `*`.
+When `true`, Glider fetches `robots.txt` from each encountered origin and skips any URL disallowed for `*`. `robots_failure_policy` controls unavailable or malformed files (`allow` or `deny`), and `robots_max_origins` bounds cached origin state.
 
 ---
 
@@ -207,11 +213,13 @@ Leave this `false` for all other JSON APIs to avoid corrupting URLs.
 
 Maximum number of child URLs to follow per parent page when a field has `follow_url: true`.  Acts as a safety cap against unexpectedly large link lists.
 
+`fail_parent_on_nested_error` defaults to `true`, so a failed required child keeps the parent resumable. Set it to `false` to emit successful child data while reporting a partial-nested warning.
+
 ---
 
 ### `interactions` — list | null · Default: `[]`
 
-Sequence of browser actions to perform before capturing page content.  Playwright only; silently ignored in `curl_cffi` mode.
+Sequence of browser actions to perform before capturing page content. Playwright only; a startup warning is emitted in `curl_cffi` mode. `interaction_failure_policy` is `warn` by default or `fail` when every action is required.
 
 See the [Interactions section](#interactions-detail) below.
 
@@ -395,7 +403,7 @@ The token is loaded once and treated as non-expiring.
 
 ## Interactions Detail
 
-All interactions execute sequentially in order.  Each interaction is retried once on failure before continuing.
+All interactions execute sequentially in order. Each interaction is retried once on failure. With `interaction_failure_policy: "fail"`, the page becomes a classified resumable failure after retries are exhausted.
 
 ```json
 "interactions": [

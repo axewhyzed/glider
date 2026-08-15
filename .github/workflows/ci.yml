@@ -28,7 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Compile check
-        run: python -m compileall engine main.py
+        run: python -m compileall engine main.py verify_release.py
 
       - name: Run test suite (no browser, no network)
         run: python -m pytest tests -q

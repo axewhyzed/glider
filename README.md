@@ -186,6 +186,7 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `rate_limit` | int ≥ 1 | `5` | Max requests per second (global, across all workers). |
 | `per_domain_rate_limit` | int or null | `null` | Optional independent per-host request rate. |
 | `request_timeout` | int | `15` | HTTP request timeout in seconds (curl_cffi mode). |
+| `interaction_failure_policy` | `"warn"` \| `"fail"` | `"warn"` | Whether a failed browser action warns or fails the page. |
 | `min_delay` | float | `1.0` | Minimum random delay (seconds) between pagination page fetches. |
 | `max_delay` | float | `3.0` | Maximum random delay (seconds) between pagination page fetches. |
 | `proxies` | list of strings | `null` | Proxy URLs cycled round-robin (e.g. `"http://user:pass@host:port"`). |
@@ -199,6 +200,8 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `wait_for_selector` | string | `null` | CSS selector to wait for before capturing page content (Playwright only). |
 | `use_checkpointing` | bool | `false` | Persist visited-URL state to SQLite for crash recovery and resume. |
 | `respect_robots_txt` | bool | `false` | Fetch and obey `robots.txt` before scraping. |
+| `robots_failure_policy` | `"allow"` \| `"deny"` | `"allow"` | Behavior when robots cannot be fetched or parsed. |
+| `robots_max_origins` | int | `1000` | Maximum cached robots origins. |
 | `append_json_suffix` | bool | `false` | When `follow_url` is used with a JSON API, append `.json` to child URLs that don't already end with it. Reddit-specific; leave `false` for all other APIs. |
 | `max_nested_urls` | int 1–100 | `5` | Max child URLs followed per parent page when using `follow_url`. |
 | `fields` | list | **Required** | Data extraction field definitions (see below). |
@@ -206,6 +209,7 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `interactions` | list | `[]` | Browser interaction sequence (Playwright only). |
 | `authentication` | object | `null` | OAuth 2.0 or bearer token configuration (see below). |
 | `max_depth` | int 0–100 | `2` | Maximum nested-follow generations (`follow_url`). |
+| `fail_parent_on_nested_error` | bool | `true` | Keep a parent resumable when any required nested child fails. |
 | `robots_ttl_seconds` | float | `3600.0` | Per-origin robots.txt cache TTL. |
 | `url_policy` | object | see below | URL/SSRF policy: `allowed_domains`, `allow_subdomains`, `allow_external_urls`, `allowed_schemes`, `block_private_networks`, `resolve_dns`, `max_redirects`. |
 | `retry` | object | see below | Retry policy: `max_attempts`, `base_delay_seconds`, `max_delay_seconds`, `retry_statuses`, `retry_after_cap_seconds`. |
@@ -607,7 +611,7 @@ See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) for a full list. Key limitati
 * **`debug_mode` config field is reserved:** The field is accepted in configs but does not yet change any behaviour.
 * **`append_json_suffix` is Reddit-specific:** Set `"append_json_suffix": true` only for Reddit-style APIs where child URLs need `.json` appended. Leave `false` for all other JSON APIs.
 * **Deduplication:** Exact keys persist within a resumable run; independent runs intentionally use separate dedup namespaces.
-* **Browser interactions are silently ignored if `use_playwright` is `false`** (a startup warning is logged).
+* **Browser interactions require Playwright:** disabled Playwright produces a startup warning; set `interaction_failure_policy: "fail"` when an action must succeed.
 * **CSV nested list fields are pipe-joined strings.** Nested list data loses structure in CSV export; use the JSON output for list-valued fields.
 
 ---

@@ -121,6 +121,8 @@ and residual risks.
 The recommended release for new deployments is **v3.3.1**. Published older
 tags remain available for reproducibility but are superseded; see
 [`docs/RELEASES.md`](docs/RELEASES.md) for release status and upgrade guidance.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the proposed post-v3.3 product
+direction.
 
 ---
 

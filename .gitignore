@@ -210,6 +210,7 @@ __marimo__/
 __pycache__/
 .env
 .DS_Store
+data/*.db
 data/*.csv
 data/*.json
 data/*.jsonl

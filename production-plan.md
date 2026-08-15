@@ -69,4 +69,8 @@ changing the core configuration contract.
 - [x] Add request and nested-child accounting plus regression coverage for the
   benchmark matrix.
 - [x] Improve the first-run examples workflow and benchmark documentation.
-- [ ] Complete release verification, tag `v3.3.0`, and push the release.
+- [x] Complete release verification, tag `v3.3.0`, and push the release.
+
+Release implementation commit: `971761f732cd1af8359e9f6a573ae21db13609b7`.
+Post-release checklist documentation is kept in a separate commit so the tag
+continues to identify the reviewed implementation.

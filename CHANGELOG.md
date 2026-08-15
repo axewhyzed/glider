@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.2.1 - Browser smoke and Windows event-loop compatibility (August 2026)
+
+### Fixes
+
+* Allow bounded, self-contained `data:text/html` browser navigations used by
+  the offline smoke gate and local browser callers; non-HTML data schemes,
+  oversized documents, data subresources, and network access remain blocked.
+* Stop mutating the process-wide Windows event-loop policy when `main.py` is
+  imported. CLI commands still select the correct loop immediately before
+  running, while Playwright tests and embedding applications retain control of
+  their proactor loop.
+
+### Verification
+
+* Browser suite: 1 passed, 313 deselected on Windows with Chromium installed.
+* Core suite: 313 passed, 1 deselected.
+* Pyright: 0 errors, 0 warnings, 0 informations.
+
 ## v3.2.0 - Usage, benchmarks, and developer ergonomics (August 2026)
 
 ### Usage validation

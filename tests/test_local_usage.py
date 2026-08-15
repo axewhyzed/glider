@@ -1,17 +1,8 @@
 """End-to-end usage checks against deterministic local HTTP fixtures."""
 
-import asyncio
-import os
-
 from benchmarks.fixture_server import FixtureServer
 from engine.schemas import ScraperConfig
 from engine.scraper import ScraperEngine
-
-
-if os.name == "nt" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
-    # Match the CLI's curl_cffi loop selection and keep the integration test
-    # free of selector-thread warnings on Windows.
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def _local_policy() -> dict[str, object]:

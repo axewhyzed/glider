@@ -52,3 +52,10 @@ The completed usage-focused phase is documented in
 [`docs/V3.2_PLAN.md`](docs/V3.2_PLAN.md). It adds deterministic local
 validation, benchmarks, examples, and developer workflow improvements without
 changing the core configuration contract.
+
+## v3.2.1 patch
+
+- [x] Fix the real Chromium `data:text/html` smoke path.
+- [x] Remove import-time Windows event-loop policy mutation from the CLI.
+- [x] Verify browser suite, full suite, Pyright, compile, examples, and package
+  build before tagging the patch release.

@@ -301,7 +301,20 @@ class BrowserManager:
 
     def _validate_navigation_url(self, url: str) -> str:
         """Validate direct browser entry points before creating a page."""
-        validated = self.url_policy.validate(url)
+        raw_url = str(url).strip()
+        parsed = urlsplit(raw_url)
+        if parsed.scheme.lower() == "data":
+            # Permit only self-contained HTML documents for the offline browser
+            # smoke gate and local browser callers. The route guard below
+            # blocks every data subresource and all network requests from this
+            # document, so this exception cannot widen outbound access.
+            media = raw_url.split(",", 1)[0].lower()
+            if not media.startswith("data:text/html"):
+                raise ValueError("Browser data navigation only supports text/html")
+            if len(raw_url) > 2_000_000:
+                raise ValueError("Browser data navigation exceeds the 2 MB limit")
+            return raw_url
+        validated = self.url_policy.validate(raw_url)
         if urlsplit(validated).scheme not in {"http", "https"}:
             raise ValueError("Browser navigation only supports http and https URLs")
         return validated
@@ -394,12 +407,19 @@ class BrowserManager:
         started = time.perf_counter()
         response = None
         try:
-            request_origin = origin(url)
+            main_scheme = urlsplit(url).scheme.lower()
+            request_origin = origin(url) if main_scheme in {"http", "https"} else None
 
             async def _page_policy(route) -> None:
                 request = route.request
                 request_url = request.url
                 request_scheme = urlsplit(request_url).scheme.lower()
+                if main_scheme == "data":
+                    if request_url == url:
+                        await route.continue_()
+                    else:
+                        await route.abort()
+                    return
                 if request_scheme not in {"http", "https"}:
                     await route.abort()
                     logger.warning(f"Browser blocked non-network request ({request_url})")
@@ -421,7 +441,7 @@ class BrowserManager:
                 filtered = dict(request.headers)
                 if headers:
                     filtered.update(headers)
-                if origin(request_url) != request_origin:
+                if request_origin is not None and origin(request_url) != request_origin:
                     filtered = {
                         key: value for key, value in filtered.items()
                         if not is_sensitive_header(key)

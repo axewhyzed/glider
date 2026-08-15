@@ -2,6 +2,16 @@
 
 ---
 
+## v3.2.0 to v3.2.1 (August 2026)
+
+This patch release fixes the offline browser smoke path and Windows embedding
+behavior. Importing `main.py` no longer changes the process-wide event-loop
+policy; CLI commands continue to configure their own transport loop before
+execution. Self-contained HTML data URLs are supported only in browser
+navigation and remain isolated from network/subresource access.
+
+---
+
 ## v3.1.0 to v3.2.0 (August 2026)
 
 This release is backward-compatible for scraper configurations and focuses on

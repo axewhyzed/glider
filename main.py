@@ -49,9 +49,6 @@ def _configure_event_loop(use_playwright: bool = False) -> None:
         pass
 
 
-_configure_event_loop()
-
-
 class ScrapeStats:
     def __init__(self):
         self.success = 0

@@ -23,7 +23,9 @@
 
 - Release implementation commit: `8c51d68420f42042cb58f6a93d2fd40223e1efb0`.
 - Annotated tag `v3.2.1` points to the release implementation commit above.
-- The post-release checklist commit is recorded after this update.
+- Post-release checklist commit: `5ca4a7d`.
+- `origin/main` contains that documentation commit; the tag intentionally
+  remains on the implementation commit.
 
 ## Post-release
 

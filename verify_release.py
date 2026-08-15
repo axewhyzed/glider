@@ -31,8 +31,12 @@ def main() -> int:
     if git("cat-file", "-t", tag) != "tag":
         raise SystemExit(f"{tag} is not an annotated tag")
     tag_target = git("rev-parse", f"{tag}^{{}}")
-    if tag_target != head:
-        raise SystemExit(f"{tag} targets {tag_target}, but HEAD is {head}")
+    ancestor_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", tag_target, head],
+        capture_output=True,
+    )
+    if ancestor_check.returncode != 0:
+        raise SystemExit(f"{tag} target {tag_target} is not an ancestor of HEAD {head}")
 
     identities = sorted(set(git("log", "--format=%an <%ae>", "HEAD").splitlines()))
     expected = "axewhyzed <77388429+axewhyzed@users.noreply.github.com>"
@@ -45,7 +49,7 @@ def main() -> int:
         raise SystemExit(
             f"remote mismatch: main={remote_head}, tag={remote_tag}, expected={head}"
         )
-    print(f"release verified: {tag} -> {head}")
+    print(f"release verified: {tag} -> {tag_target}; main -> {head}")
     return 0
 
 

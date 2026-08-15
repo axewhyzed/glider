@@ -17,6 +17,7 @@ class PreviewDiagnostics:
     pagination_match: Any = None
     pagination_next: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
+    nested_fetched: int = 0
 
 
 def build_preview_report(
@@ -66,7 +67,7 @@ def build_preview_report(
         "fields": fields_report,
         "sample_record": data,
         "record_count": len(data) if isinstance(data, list) else (1 if data else 0),
-        "nested_fetched": 0,
+        "nested_fetched": diagnostics.nested_fetched,
         "warnings": diagnostics.warnings,
     }
 
@@ -124,8 +125,21 @@ def _aggregate_categories(domains: Dict[str, Any]) -> Dict[str, int]:
     return agg
 
 
-def build_resume_command(argv: List[str], run_id: str) -> str:
-    """Build a resume command from the current argv + run id."""
+def build_resume_command(
+    argv: List[str], run_id: str, config_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+) -> str:
+    """Build an executable, shell-safe resume command."""
     import sys
+    import shlex
     script = argv[0] if argv else "main.py"
-    return f"{sys.executable} {script} --resume {run_id}"
+    # Console-script invocations already point at the executable; Python
+    # scripts need the interpreter prefix.
+    command = [sys.executable, script] if script.lower().endswith((".py", ".pyw")) else [script]
+    command += ["scrape"]
+    if config_path:
+        command.append(config_path)
+    command += ["--resume", run_id]
+    if output_dir:
+        command += ["--output-dir", output_dir]
+    return " ".join(shlex.quote(str(part)) for part in command)

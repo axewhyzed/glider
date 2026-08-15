@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from engine.export import convert_to_csv, convert_to_json
+from engine.export import ExportError, convert_to_csv, convert_to_json
 from engine.exitcodes import ExitCode
 from engine.report import build_final_report, build_resume_command, build_preview_report, PreviewDiagnostics
 from engine.redact import loguru_filter
@@ -77,6 +77,7 @@ class ScrapeStats:
             "rate_limit",
             "auth_error",
             "validation_error",
+            "nested_error",
             "internal_error",
         }:
             self.failed += event.count
@@ -182,23 +183,22 @@ def _atomic_export(stream: Path, output_dir: Path, field_order: list[str]) -> Di
     csv_tmp = output_dir / "output.csv.tmp"
     for temporary in (json_tmp, csv_tmp):
         temporary.unlink(missing_ok=True)
-    convert_to_json(stream, json_tmp)
-    convert_to_csv(stream, csv_tmp, field_order=field_order)
-    os.replace(json_tmp, json_output)
-    os.replace(csv_tmp, csv_output)
+    try:
+        convert_to_json(stream, json_tmp)
+        convert_to_csv(stream, csv_tmp, field_order=field_order)
+        os.replace(json_tmp, json_output)
+        os.replace(csv_tmp, csv_output)
+    except Exception:
+        json_tmp.unlink(missing_ok=True)
+        csv_tmp.unlink(missing_ok=True)
+        raise
     return {"json": str(json_output), "csv": str(csv_output)}
 
 
 async def _run_preview(config: ScraperConfig, url: Optional[str]) -> Dict[str, Any]:
     engine = ScraperEngine(config, dry_run=True)
     result, data = await engine.preview(url)
-    diagnostics = PreviewDiagnostics(
-        field_matches={f.name: 0 for f in config.fields},
-        samples={},
-        pagination_match=None,
-        pagination_next=None,
-        warnings=[],
-    )
+    diagnostics = engine.preview_diagnostics or PreviewDiagnostics()
     return build_preview_report(result, data, config, diagnostics)
 
 
@@ -331,7 +331,10 @@ def _finalize_run(context, config, stats, config_path, cancelled: bool = False):
         metrics = stats.metrics_snapshot if hasattr(stats, "metrics_snapshot") else {}
         failures_ring = getattr(stats, "failures_ring", [])
     state = "cancelled" if cancelled else "completed"
-    resume_cmd = build_resume_command([sys.argv[0], config_path], context.run_id)
+    resume_cmd = build_resume_command(
+        [sys.argv[0]], context.run_id, config_path=config_path,
+        output_dir=str(context.output_root),
+    )
     report = build_final_report(
         stats if stats is not None else _EmptyStats(),
         context,

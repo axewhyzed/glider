@@ -75,6 +75,14 @@ class CheckpointManager:
             )
             """
         )
+        await self._db_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dedup_keys (
+                key TEXT PRIMARY KEY,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         # Migrate legacy rows. ``visited`` may or may not have a timestamp
         # column depending on when the database was created, so select only
         # columns that are guaranteed to exist.
@@ -189,6 +197,38 @@ class CheckpointManager:
         async with self._db_conn.execute(query) as cursor:
             rows = await cursor.fetchall()
         return {row[0] for row in rows}
+
+    async def get_dedup_keys(self, limit: Optional[int] = None) -> List[str]:
+        """Load authoritative exact-dedup keys for a resumed run."""
+        if not self.enabled or not self._db_conn:
+            return []
+        query = "SELECT key FROM dedup_keys ORDER BY rowid DESC"
+        params = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (limit,)
+        async with self._db_conn.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows]
+
+    async def mark_dedup_key(self, key: str, max_keys: Optional[int] = None) -> None:
+        """Persist an exact key atomically; optionally evict oldest keys."""
+        if not self.enabled or not self._db_conn:
+            return
+        try:
+            await self._db_conn.execute(
+                "INSERT OR IGNORE INTO dedup_keys(key) VALUES (?)", (key,)
+            )
+            if max_keys is not None:
+                await self._db_conn.execute(
+                    "DELETE FROM dedup_keys WHERE key IN "
+                    "(SELECT key FROM dedup_keys ORDER BY rowid ASC LIMIT "
+                    "MAX(0, (SELECT COUNT(*) FROM dedup_keys) - ?))",
+                    (max_keys,),
+                )
+            await self._db_conn.commit()
+        except Exception as exc:
+            logger.warning(f"Checkpoint dedup error: {exc}")
 
     async def mark_child_result(self, url: str, parent_url: str, field_key: str, record_json: str):
         """Persist an extracted child record for resume re-attachment (P4.6)."""

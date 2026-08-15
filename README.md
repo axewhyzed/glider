@@ -20,8 +20,10 @@ Built on **Python 3.10+**, it leverages **AsyncIO**, **Playwright**, and **curl_
 * **OAuth 2.0 Password Flow:** Automatic token acquisition and refresh with expiry tracking; tokens refreshed 60 s before expiry.
 * **Bearer Token Injection:** Static bearer tokens loaded from config and injected into every request header.
 * **JSON API Scraping:** Native support for REST APIs using JSONPath selectors.
+* **GET/POST API Requests:** Configure JSON or form request bodies with method-aware retries.
 * **Cookie Persistence:** Load and inject session cookies from a JSON file into both curl_cffi and Playwright sessions.
 * **Proxy-Safe Authentication:** Auth requests respect the proxy pool to prevent IP leaks.
+* **Sitemap Discovery:** List mode can crawl bounded sitemap indexes and URL sets.
 
 ### 🔗 Recursive Data Linking
 * **Follow Links Automatically:** Extract nested data by following extracted URLs to child pages.
@@ -174,15 +176,24 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `name` | string | **Required** | Project name; used for output filenames and checkpoint DB. |
 | `base_url` | URL | Required for `pagination` mode | Starting URL. |
 | `mode` | `"pagination"` \| `"list"` | `"pagination"` | `pagination`: follows next-page links sequentially. `list`: scrapes a fixed list of URLs in parallel. |
-| `start_urls` | list of URLs | `[]` | Required when `mode` is `"list"`. |
+| `start_urls` | list of URLs | `[]` | URLs to scrape in list mode; may be combined with `sitemap_urls`. |
 | `response_type` | `"html"` \| `"json"` | `"html"` | Parse response as HTML or as a JSON API response. |
+| `request_method` | `"GET"` \| `"POST"` | `"GET"` | HTTP/browser request method. |
+| `request_body` | any | `null` | JSON or form body for POST requests. |
+| `request_body_type` | `"json"` \| `"form"` | `"json"` | Encoding used for a POST body. |
 | `use_playwright` | bool | `false` | Use a real Chromium browser instead of curl_cffi. Required for JavaScript-heavy sites. |
 | `concurrency` | int ≥ 1 | `2` | Max parallel workers. Applies to `list` mode only. |
 | `rate_limit` | int ≥ 1 | `5` | Max requests per second (global, across all workers). |
+| `per_domain_rate_limit` | int or null | `null` | Optional independent per-host request rate. |
 | `request_timeout` | int | `15` | HTTP request timeout in seconds (curl_cffi mode). |
 | `min_delay` | float | `1.0` | Minimum random delay (seconds) between pagination page fetches. |
 | `max_delay` | float | `3.0` | Maximum random delay (seconds) between pagination page fetches. |
 | `proxies` | list of strings | `null` | Proxy URLs cycled round-robin (e.g. `"http://user:pass@host:port"`). |
+| `proxy_failure_threshold` | int | `3` | Consecutive proxy failures before cooldown. |
+| `proxy_cooldown_seconds` | float | `60` | Proxy circuit cooldown before a half-open probe. |
+| `sitemap_urls` | list of URLs | `[]` | Sitemap or sitemap-index roots for list-mode discovery. |
+| `sitemap_max_urls` | int | `10000` | Maximum discovered sitemap URLs. |
+| `sitemap_max_depth` | int | `3` | Maximum sitemap-index nesting depth. |
 | `headers` | object | `null` | Custom HTTP headers added to every request. |
 | `cookies_file` | string | `null` | Path to a JSON file containing cookies as `{"name": "value"}`. |
 | `wait_for_selector` | string | `null` | CSS selector to wait for before capturing page content (Playwright only). |
@@ -200,6 +211,7 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `retry` | object | see below | Retry policy: `max_attempts`, `base_delay_seconds`, `max_delay_seconds`, `retry_statuses`, `retry_after_cap_seconds`. |
 | `browser` | object | see below | Browser safety: `ignore_https_errors`, `context_max_requests`, `proxy_rotation`. |
 | `dedup` | object | see below | Dedup policy: `mode` (`none`/`url`/`fields`/`exact_hash`), `capacity`, `error_rate`, `fields`, `exact_capacity`. |
+| `record_field` | string or null | `null` | Primary list field used for record cardinality when a page has multiple lists. |
 | `validation` | object | see below | Extraction validation: `min_records_per_page`, `required_fields`, `fail_on_empty`. |
 | `debug_snapshots` | object | see below | Bounded snapshots: `enabled`, `max_files`, `max_bytes_per_file`, `max_total_bytes`. |
 
@@ -590,11 +602,11 @@ Edit `pyproject.toml` (dependencies / optional-dependencies) for packaging, or t
 
 See [`docs/KNOWN_ISSUES.md`](docs/KNOWN_ISSUES.md) for a full list. Key limitations to be aware of:
 
-* **GET only:** Only HTTP GET requests are supported. POST-based pagination or form submission is not implemented.
+* **GET/POST:** Single-request GET and POST API scraping is supported; multi-step workflows need explicit integration.
 * **Pagination is sequential:** In `pagination` mode, pages are fetched one at a time regardless of the `concurrency` setting (which only affects `list` mode).
 * **`debug_mode` config field is reserved:** The field is accepted in configs but does not yet change any behaviour.
 * **`append_json_suffix` is Reddit-specific:** Set `"append_json_suffix": true` only for Reddit-style APIs where child URLs need `.json` appended. Leave `false` for all other JSON APIs.
-* **Bloom filter capacity is not configurable via JSON config.** It is hardcoded at 100 000 items. To change it, edit `engine/scraper.py` directly (see [`UPGRADE_GUIDE.md`](UPGRADE_GUIDE.md)).
+* **Deduplication:** Exact keys persist within a resumable run; independent runs intentionally use separate dedup namespaces.
 * **Browser interactions are silently ignored if `use_playwright` is `false`** (a startup warning is logged).
 * **CSV nested list fields are pipe-joined strings.** Nested list data loses structure in CSV export; use the JSON output for list-valued fields.
 

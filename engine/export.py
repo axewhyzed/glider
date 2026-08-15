@@ -1,120 +1,89 @@
-import json
+"""Streaming, fail-fast JSON and CSV exporters."""
+
+from __future__ import annotations
+
 import csv
+import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
+
 from loguru import logger
+
 from engine.utils import flatten_dict
 
 
-def _stringify_lists(d: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert any list values in a flat dict to pipe-separated strings for CSV."""
-    result = {}
-    for k, v in d.items():
-        if isinstance(v, list):
-            result[k] = " | ".join(str(item) for item in v)
-        else:
-            result[k] = v
-    return result
+class ExportError(RuntimeError):
+    """Raised when an export cannot complete without data loss."""
 
 
-def convert_to_json(input_file: Path, output_file: Path):
-    """
-    Streams JSONL to a valid JSON array.
-    Memory Usage: O(1) (Line by line)
-    """
-    logger.info(f"📂 Converting {input_file} to JSON...")
+def _iter_items(line: str, line_number: int) -> Iterable[Any]:
     try:
-        with open(input_file, 'r', encoding='utf-8') as fin, \
-             open(output_file, 'w', encoding='utf-8') as fout:
-            
-            fout.write('[\n')
+        data = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ExportError(f"Malformed JSONL at line {line_number}: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise ExportError(f"JSONL line {line_number} must contain an object")
+    for value in data.values():
+        yield from (value if isinstance(value, list) else [value])
+
+
+def _stringify_lists(data: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: " | ".join(str(item) for item in value) if isinstance(value, list) else value
+            for key, value in data.items()}
+
+
+def convert_to_json(input_file: Path, output_file: Path) -> None:
+    logger.info(f"Converting {input_file} to JSON")
+    try:
+        with input_file.open("r", encoding="utf-8") as source, output_file.open("w", encoding="utf-8") as target:
+            target.write("[\n")
             first = True
-            for line in fin:
-                if not line.strip(): continue
-                try:
-                    data = json.loads(line)
-                    # Flatten top-level keys if they are just grouping containers
-                    for _, value in data.items():
-                        items = value if isinstance(value, list) else [value]
-                        for item in items:
-                            if not first: fout.write(',\n')
-                            json.dump(item, fout, ensure_ascii=False, indent=2)
-                            first = False
-                except json.JSONDecodeError:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
                     continue
-            
-            fout.write('\n]')
-            logger.success(f"✅ JSON saved to {output_file}")
-    except Exception as e:
-        logger.error(f"JSON Export failed: {e}")
+                for item in _iter_items(line, line_number):
+                    if not first:
+                        target.write(",\n")
+                    json.dump(item, target, ensure_ascii=False, indent=2)
+                    first = False
+            target.write("\n]")
+    except ExportError:
+        output_file.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        output_file.unlink(missing_ok=True)
+        raise ExportError(f"JSON export failed: {exc}") from exc
+    logger.success(f"JSON saved to {output_file}")
 
-def convert_to_csv(input_file: Path, output_file: Path, field_order: Optional[List[str]] = None):
-    """
-    Two-pass CSV conversion to handle dynamic headers without memory spikes.
-    Pass 1: Scan for keys.
-    Pass 2: Write rows.
 
-    Args:
-        field_order: Optional list of field names to use as the preferred column order.
-                     Any discovered fields not in this list are appended alphabetically.
-    """
-    logger.info(f"📂 Converting {input_file} to CSV...")
+def convert_to_csv(input_file: Path, output_file: Path, field_order: Optional[List[str]] = None) -> None:
+    logger.info(f"Converting {input_file} to CSV")
     headers: Set[str] = set()
-    
-    # Pass 1: Collect Headers
     try:
-        with open(input_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip(): continue
-                try:
-                    data = json.loads(line)
-                    for _, value in data.items():
-                        items = value if isinstance(value, list) else [value]
-                        for item in items:
-                            if isinstance(item, dict):
-                                flat = flatten_dict(item)
-                                headers.update(flat.keys())
-                            else:
-                                logger.warning(f"CSV: skipping non-dict item of type {type(item).__name__} — check your field configuration")
-                except json.JSONDecodeError:
+        with input_file.open("r", encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
                     continue
-    except Exception as e:
-        logger.error(f"CSV Pass 1 failed: {e}")
-        return
-
-    if not headers:
-        logger.warning("No headers found for CSV.")
-        return
-
-    # Respect preferred field order; append any extra fields alphabetically
-    if field_order:
-        ordered = [f for f in field_order if f in headers]
-        remaining = sorted(headers - set(ordered))
-        fieldnames = ordered + remaining
-    else:
-        fieldnames = sorted(list(headers))
-
-    # Pass 2: Write Data
-    try:
-        with open(input_file, 'r', encoding='utf-8') as fin, \
-             open(output_file, 'w', newline='', encoding='utf-8') as fout:
-            
-            writer = csv.DictWriter(fout, fieldnames=fieldnames, extrasaction='ignore')
+                for item in _iter_items(line, line_number):
+                    if isinstance(item, dict):
+                        headers.update(flatten_dict(item).keys())
+        if not headers:
+            raise ExportError("No tabular records found for CSV export")
+        ordered = [field for field in (field_order or []) if field in headers]
+        fieldnames = ordered + sorted(headers - set(ordered))
+        with input_file.open("r", encoding="utf-8") as source, output_file.open("w", newline="", encoding="utf-8") as target:
+            writer = csv.DictWriter(target, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
-            
-            for line in fin:
-                if not line.strip(): continue
-                try:
-                    data = json.loads(line)
-                    for _, value in data.items():
-                        items = value if isinstance(value, list) else [value]
-                        for item in items:
-                            if isinstance(item, dict):
-                                flat = flatten_dict(item)
-                                row = _stringify_lists(flat)
-                                writer.writerow(row)
-                except json.JSONDecodeError:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
                     continue
-        logger.success(f"✅ CSV saved to {output_file}")
-    except Exception as e:
-        logger.error(f"CSV Export failed: {e}")
+                for item in _iter_items(line, line_number):
+                    if isinstance(item, dict):
+                        writer.writerow(_stringify_lists(flatten_dict(item)))
+    except ExportError:
+        output_file.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        output_file.unlink(missing_ok=True)
+        raise ExportError(f"CSV export failed: {exc}") from exc
+    logger.success(f"CSV saved to {output_file}")

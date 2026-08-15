@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, cast
+from urllib.parse import urlsplit
 
 try:
     from playwright.async_api import async_playwright
@@ -17,7 +18,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from fake_useragent import UserAgent
 
 from engine.schemas import ScraperConfig, InteractionType
-from engine.network import FetchResult
+from engine.network import FetchResult, SENSITIVE_HEADERS, UrlPolicy, origin
 
 # Optional stealth — support both old module-style and new direct-function-style imports
 stealth_async: Optional[Callable[[Any], Awaitable[None]]] = None
@@ -36,8 +37,9 @@ class BrowserManager:
     Manages Playwright lifecycle: Browsers, Contexts, and Pages.
     Implements context rotation to prevent memory leaks in long-running jobs.
     """
-    def __init__(self, config: ScraperConfig):
+    def __init__(self, config: ScraperConfig, url_policy: Optional[UrlPolicy] = None):
         self.config = config
+        self.url_policy = url_policy or UrlPolicy(config.url_policy)
         self.playwright = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
@@ -78,14 +80,14 @@ class BrowserManager:
 
     async def _install_request_guard(self, context) -> None:
         """Abort in-flight requests that resolve to private addresses (SSRF guard)."""
-        from engine.network import _host_resolves_to_private
-        from urllib.parse import urlsplit
+        from engine.network import _host_resolves_to_private, _host_is_private
 
         async def _guard(route) -> None:
-            host = urlsplit(route.request.url).hostname or ""
-            if host and _host_resolves_to_private(host):
+            request_url = route.request.url
+            host = urlsplit(request_url).hostname or ""
+            if host and (_host_is_private(host) or _host_resolves_to_private(host)):
                 await route.abort()
-                logger.warning(f"SSRF guard aborted {route.request.url}")
+                logger.warning(f"SSRF guard aborted {request_url}")
             else:
                 await route.continue_()
 
@@ -220,6 +222,9 @@ class BrowserManager:
         headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
         worker_id: int = 0,
+        method: str = "GET",
+        body: Any = None,
+        body_type: str = "json",
     ) -> FetchResult:
         """Fetch a page while keeping context rotation safe under concurrency.
 
@@ -229,21 +234,25 @@ class BrowserManager:
         reached.
         """
         if self.config.browser.proxy_rotation == "per_request":
-            return await self._fetch_page_single_context(url, headers, proxy)
-        return await self._fetch_page_shared_context(url, headers, proxy)
+            return await self._fetch_page_single_context(url, headers, proxy, method, body, body_type)
+        return await self._fetch_page_shared_context(url, headers, proxy, method, body, body_type)
 
     async def _fetch_page_single_context(
         self,
         url: str,
         headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
+        method: str = "GET",
+        body: Any = None,
+        body_type: str = "json",
     ) -> FetchResult:
         """per_request mode: one throwaway context per fetch."""
         if not self.browser:
             raise RuntimeError("Browser not started")
         context = await self.browser.new_context(**self._build_context_options(proxy))
         try:
-            return await self._fetch_with_context(context, url, headers)
+            await self._install_request_guard(context)
+            return await self._fetch_with_context(context, url, headers, method, body, body_type)
         finally:
             try:
                 await context.close()
@@ -255,6 +264,9 @@ class BrowserManager:
         url: str,
         headers: Optional[Dict[str, str]] = None,
         proxy: Optional[str] = None,
+        method: str = "GET",
+        body: Any = None,
+        body_type: str = "json",
     ) -> FetchResult:
         """per_context mode: shared context with safe rotation."""
         if not self.context:
@@ -272,7 +284,7 @@ class BrowserManager:
             self._active_requests += 1
 
         try:
-            return await self._fetch_with_context(context, url, headers)
+            return await self._fetch_with_context(context, url, headers, method, body, body_type)
         finally:
             async with self._context_lock:
                 self._active_requests -= 1
@@ -283,19 +295,70 @@ class BrowserManager:
         context,
         url: str,
         headers: Optional[Dict[str, str]] = None,
+        method: str = "GET",
+        body: Any = None,
+        body_type: str = "json",
     ) -> FetchResult:
         """Open a page in ``context``, navigate, and return a FetchResult."""
         page = await context.new_page()
         started = time.perf_counter()
         response = None
         try:
-            if headers:
+            parsed_root = urlsplit(url)
+            request_origin = origin(url) if parsed_root.scheme in {"http", "https"} else "opaque"
+
+            async def _page_policy(route) -> None:
+                request = route.request
+                request_url = request.url
+                if urlsplit(request_url).scheme not in {"http", "https"}:
+                    await route.continue_()
+                    return
+                previous = request.redirected_from
+                redirect_hops = 0
+                while previous is not None:
+                    redirect_hops += 1
+                    previous = previous.redirected_from
+                try:
+                    parent_url = request.redirected_from.url if request.redirected_from else url
+                    self.url_policy.validate(request_url, parent_url=parent_url)
+                    if redirect_hops > self.config.url_policy.max_redirects:
+                        raise ValueError("browser redirect limit exceeded")
+                except Exception as exc:
+                    logger.warning(f"Browser request blocked by policy ({request_url}): {exc}")
+                    await route.abort()
+                    return
+                filtered = dict(request.headers)
+                if headers:
+                    filtered.update(headers)
+                if origin(request_url) != request_origin:
+                    filtered = {
+                        key: value for key, value in filtered.items()
+                        if key.lower() not in SENSITIVE_HEADERS
+                    }
+                await route.continue_(headers=filtered)
+
+            if hasattr(page, "route"):
+                await page.route("**/*", _page_policy)
+            elif headers and hasattr(page, "set_extra_http_headers"):
+                # Compatibility fallback for lightweight test doubles. Real
+                # Playwright pages always use the origin-aware route above.
                 await page.set_extra_http_headers(headers)
             if stealth_async:
                 await stealth_async(page)
 
             nav_timeout_ms = (self.config.request_timeout or 30) * 1000
-            response = await page.goto(url, timeout=nav_timeout_ms, wait_until="domcontentloaded")
+            goto_options: Dict[str, Any] = {
+                "timeout": nav_timeout_ms,
+                "wait_until": "domcontentloaded",
+            }
+            if method != "GET":
+                goto_options["method"] = method
+                if body is not None:
+                    goto_options["post_data"] = (
+                        json.dumps(body) if body_type == "json" and not isinstance(body, str)
+                        else str(body)
+                    )
+            response = await page.goto(url, **goto_options)
             if self.config.interactions:
                 await self._handle_interactions(page)
             if self.config.wait_for_selector:
@@ -314,8 +377,15 @@ class BrowserManager:
                     response_headers = await response.all_headers()
                 except Exception:
                     response_headers = dict(response.headers)
+            if self.config.response_type == "json" and response is not None:
+                try:
+                    content = (await response.body()).decode("utf-8", errors="replace")
+                except Exception:
+                    content = await response.text()
+            else:
+                content = await page.content()
             return FetchResult(
-                content=await page.content(),
+                content=content,
                 requested_url=url,
                 final_url=page.url or url,
                 status_code=status_code,

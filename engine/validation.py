@@ -115,11 +115,27 @@ def _validate_mode_requirements(config: ScraperConfig, issues: List[ValidationIs
             ValidationIssue("base_url", "'base_url' is required when mode is 'pagination'")
         )
     if config.mode == ScrapeMode.LIST and not config.start_urls:
-        issues.append(
-            ValidationIssue(
-                "start_urls", "'start_urls' must be a non-empty list when mode is 'list'"
+        if not config.sitemap_urls:
+            issues.append(
+                ValidationIssue(
+                    "start_urls", "'start_urls' or 'sitemap_urls' must be non-empty when mode is 'list'"
+                )
             )
-        )
+
+
+def _validate_dedup_and_records(config: ScraperConfig, issues: List[ValidationIssue]) -> None:
+    dedup = config.dedup
+    mode = dedup.get("mode") if isinstance(dedup, dict) else getattr(dedup.mode, "value", dedup.mode)
+    fields = dedup.get("fields", []) if isinstance(dedup, dict) else dedup.fields
+    if mode == "fields":
+        if not fields:
+            issues.append(ValidationIssue("dedup.fields", "At least one field is required for dedup mode 'fields'"))
+        known = {field.name for field in config.fields}
+        for name in fields:
+            if name not in known:
+                issues.append(ValidationIssue("dedup.fields", f"Unknown configured field: {name}"))
+    if config.record_field and config.record_field not in {field.name for field in config.fields}:
+        issues.append(ValidationIssue("record_field", f"Unknown configured field: {config.record_field}"))
 
 
 def _validate_follow_url_fields(
@@ -166,6 +182,7 @@ def validate_config_data(raw_config: Dict[str, Any], config_path: Optional[Path]
             _validate_delay_pair(partial, issues)
             _validate_mode_requirements(partial, issues)
             _validate_follow_url_fields(partial.fields, "fields", issues)
+            _validate_dedup_and_records(partial, issues)
         return ValidationResult(None, raw_config, issues)
     except Exception as exc:
         return ValidationResult(None, raw_config, [ValidationIssue("config", str(exc))])
@@ -197,6 +214,7 @@ def validate_config_data(raw_config: Dict[str, Any], config_path: Optional[Path]
     _validate_delay_pair(config, issues)
     _validate_mode_requirements(config, issues)
     _validate_follow_url_fields(config.fields, "fields", issues)
+    _validate_dedup_and_records(config, issues)
     return ValidationResult(config, raw_config, issues)
 
 

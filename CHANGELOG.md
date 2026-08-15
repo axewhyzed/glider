@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.0.0 - Secure transport and production capabilities (August 2026)
+
+### Correctness and security
+
+* Unified HTTP and browser status/retry behavior, including browser 429/5xx handling and elapsed failure metrics.
+* Enforced SSRF policy for every browser context/request, origin-scoped sensitive headers, and redirect-hop validation.
+* Recomputed credentials per HTTP redirect hop and made nested failures resumable through parent checkpoints.
+* Added durable exact deduplication for resumed runs, stable URL ordering, explicit record cardinality, bounded failure memory, and fail-fast atomic exports.
+* Replaced placeholder preview values with selector, pagination, nested, sample, and warning diagnostics.
+
+### Capabilities
+
+* Added safe GET/POST API requests with JSON/form bodies.
+* Added bounded per-domain rate limiting and run-scoped proxy circuit breaking.
+* Added bounded sitemap and sitemap-index discovery for list mode.
+* Added raw browser navigation-response capture for JSON APIs.
+
+### Verification
+
+* Core suite: 268 passed, 1 deselected locally.
+* Added v3 contract, sitemap, POST, export, limiter, proxy, and security regression coverage.
+
 ## v2.9.0 — Production Readiness (August 2026)
 
 ### Reliability and operations

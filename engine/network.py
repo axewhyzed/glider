@@ -24,6 +24,7 @@ class RequestPurpose(str, Enum):
     NESTED = "nested"
     ROBOTS = "robots"
     OAUTH = "oauth"
+    SITEMAP = "sitemap"
 
 
 @dataclass
@@ -225,9 +226,11 @@ class UrlPolicy:
         parent_url: Optional[str],
         configured: Optional[Mapping[str, str]],
         bearer_token: Optional[str] = None,
+        credential_origin: Optional[str] = None,
     ) -> Dict[str, str]:
         headers = {str(k): str(v) for k, v in (configured or {}).items()}
-        same_origin = not parent_url or origin(url) == origin(parent_url)
+        scope = credential_origin or (origin(parent_url) if parent_url else origin(url))
+        same_origin = origin(url) == scope
         if not same_origin:
             headers = {k: v for k, v in headers.items() if k.lower() not in SENSITIVE_HEADERS}
         if bearer_token and same_origin:

@@ -188,6 +188,12 @@ class DedupConfig(BaseModel):
     fields: List[str] = Field(default_factory=list)  # top-level fields for FIELDS mode
     exact_capacity: int = Field(default=100_000, ge=1000, le=10_000_000)
 
+    @model_validator(mode="after")
+    def validate_fields_mode(self) -> "DedupConfig":
+        if self.mode == DedupMode.FIELDS and not self.fields:
+            raise ValueError("dedup.fields must contain at least one field when mode is 'fields'")
+        return self
+
 
 class ExtractionValidation(BaseModel):
     """Post-extraction validation (P6.2)."""
@@ -213,6 +219,9 @@ class ScraperConfig(BaseModel):
     start_urls: Optional[List[HttpUrl]] = Field(default_factory=list)
     
     response_type: Literal["html", "json"] = "html"
+    request_method: Literal["GET", "POST"] = "GET"
+    request_body: Optional[Any] = None
+    request_body_type: Literal["json", "form"] = "json"
     use_playwright: bool = False
     debug_mode: bool = False
     concurrency: int = 2
@@ -238,6 +247,15 @@ class ScraperConfig(BaseModel):
     robots_ttl_seconds: float = Field(default=3600.0, ge=0, le=86400)
     # Bounded in-memory failure ring (P7.4); failures are also streamed to disk.
     max_failed_entries: int = Field(default=1000, ge=1, le=100000)
+    # Explicit record cardinality for pages containing multiple list fields.
+    record_field: Optional[str] = None
+    # Optional sitemap discovery roots for list-mode crawls.
+    sitemap_urls: List[HttpUrl] = Field(default_factory=list)
+    sitemap_max_urls: int = Field(default=10000, ge=1, le=1_000_000)
+    sitemap_max_depth: int = Field(default=3, ge=0, le=20)
+    per_domain_rate_limit: Optional[int] = Field(default=None, ge=1, le=100000)
+    proxy_failure_threshold: int = Field(default=3, ge=1, le=100)
+    proxy_cooldown_seconds: float = Field(default=60.0, ge=0, le=86400)
 
     # When response_type is "json" and follow_url is used, set this to True to
     # automatically append ".json" to child URLs that don't already end with it.
@@ -272,7 +290,16 @@ class ScraperConfig(BaseModel):
         if self.mode == ScrapeMode.PAGINATION and not self.base_url:
             raise ValueError("'base_url' is required when mode is 'pagination'")
         if self.mode == ScrapeMode.LIST and not self.start_urls:
-            raise ValueError("'start_urls' must be a non-empty list when mode is 'list'")
+            if not self.sitemap_urls:
+                raise ValueError("'start_urls' or 'sitemap_urls' must be non-empty when mode is 'list'")
+
+        top_level_lists = [field.name for field in self.fields if field.is_list]
+        if self.record_field and self.record_field not in {field.name for field in self.fields}:
+            raise ValueError(f"record_field '{self.record_field}' is not a configured top-level field")
+        if len(top_level_lists) > 1 and not self.record_field:
+            # Keep legacy configurations valid while making the cardinality
+            # choice explicit in validation output for new configurations.
+            pass
 
         def validate_nested_fields(fields: List[DataField]) -> None:
             for field in fields:

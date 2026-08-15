@@ -14,6 +14,16 @@ Project identifier.  Used as a prefix for all output filenames, the checkpoint d
 "name": "my_product_scraper"
 ```
 
+## v3 request and discovery options
+
+`request_method` accepts `GET` or `POST`. For POST requests, `request_body` contains the payload and `request_body_type` selects `json` or `form` encoding. The same URL policy, credential scoping, retry, and rate-limit rules apply to both methods.
+
+`per_domain_rate_limit` adds an independent bounded token bucket per hostname on top of the global `rate_limit`. `proxy_failure_threshold` and `proxy_cooldown_seconds` control the run-scoped proxy circuit breaker.
+
+List mode may use `sitemap_urls` instead of, or in addition to, `start_urls`. Sitemap indexes and URL sets are traversed in document order and bounded by `sitemap_max_urls` and `sitemap_max_depth`.
+
+For pages with multiple independent list fields, set `record_field` to the primary record collection. Without it, Glider uses the largest list length rather than summing parallel columns.
+
 Spaces are converted to underscores in filenames (e.g. `"My Scraper"` → `my_scraper_20250101_120000.json`).
 
 ---

@@ -23,12 +23,13 @@ class ErrorCategory(str, Enum):
     RATE_LIMIT = "rate_limit"       # 429/503 with Retry-After at max attempts
     POLICY = "url_policy_blocked"   # SSRF/URL policy refused the request
     VALIDATION = "validation_error"  # extraction validation failed (P6.2)
+    NESTED = "nested_error"         # required child extraction failed
     INTERNAL = "internal_error"     # programmer error / unexpected exception
 
 
 # Categories that must NEVER be retried (a retry cannot heal them).
 NON_RETRYABLE_CATEGORIES = frozenset(
-    {ErrorCategory.PARSE, ErrorCategory.ROBOTS, ErrorCategory.AUTH,
+     {ErrorCategory.PARSE, ErrorCategory.ROBOTS, ErrorCategory.AUTH,
      ErrorCategory.POLICY, ErrorCategory.VALIDATION, ErrorCategory.INTERNAL}
 )
 
@@ -49,6 +50,7 @@ class FetchError(Exception):
         retry_after: Optional[float] = None,
         cause: Optional[BaseException] = None,
         attempts: int = 1,
+        elapsed_ms: float = 0.0,
     ) -> None:
         self.category = category
         self.url = url
@@ -56,6 +58,7 @@ class FetchError(Exception):
         self.retry_after = retry_after
         self.cause = cause
         self.attempts = attempts
+        self.elapsed_ms = elapsed_ms
         super().__init__(message or f"{category.value} for {url}")
 
     @property

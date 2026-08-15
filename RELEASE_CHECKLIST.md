@@ -14,13 +14,20 @@
 
 ## Release
 
-- [ ] Version is `3.2.0` in `pyproject.toml`.
-- [ ] Create annotated tag: `git tag -a v3.2.0 -m "Glider v3.2.0"`.
-- [ ] Push release commit and tag: `git push origin main --follow-tags`.
+- [x] Version is `3.2.0` in `pyproject.toml`.
+- [x] Create annotated tag: `git tag -a v3.2.0 -m "Glider v3.2.0"`.
+- [x] Push release commit and tag: `git push origin main --follow-tags`.
+
+### Release references
+
+- Release implementation commit: `17ffd39dfc8698738a7c27e3cf80b46369e8faad`.
+- Annotated tag `v3.2.0` points to the release implementation commit above.
+- The final documentation follow-up commit is recorded after this checklist
+  is updated; `origin/main` will point to that descendant commit.
 
 ## Post-release
 
-- [ ] Run `venv\Scripts\python.exe verify_release.py --version 3.2.0`.
-- [ ] Verify GitHub shows tag `v3.2.0` and the release commit.
-- [ ] Record the release commit, tag target, post-release documentation commit,
-  and remote verification here.
+- [x] Run `venv\Scripts\python.exe verify_release.py --version 3.2.0`.
+- [x] Verify GitHub shows tag `v3.2.0` and the release commit.
+- [ ] Record the final documentation commit and remote verification after the
+  checklist follow-up is pushed.

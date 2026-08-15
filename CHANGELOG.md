@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.0.2 - Safe browser proxy rotation (August 2026)
+
+### Fixes
+
+* Force a safe shared Playwright context rotation when the active proxy circuit opens.
+* Wait for in-flight shared-context requests to finish before switching proxies.
+* Fall back to a direct browser context when every configured proxy is circuit-open.
+* Document legacy URL-only checkpoint completion semantics and robots failure-policy behavior.
+
 ## v3.0.1 - Follow-up correctness and policy controls (August 2026)
 
 ### Fixes

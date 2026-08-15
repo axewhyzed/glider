@@ -23,6 +23,42 @@ def _config(**overrides):
     return ScraperConfig(**values)
 
 
+class _FakePage:
+    url = "https://example.com/"
+
+    async def add_init_script(self, script=None, **kwargs):
+        pass
+
+    async def goto(self, url, **kwargs):
+        self.url = url
+        return None
+
+    async def content(self):
+        return "<html></html>"
+
+    async def close(self):
+        pass
+
+
+class _FakeContext:
+    def __init__(self):
+        self.closed = False
+
+    async def new_page(self):
+        return _FakePage()
+
+    async def route(self, pattern, handler):
+        pass
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeBrowser:
+    async def new_context(self, **kwargs):
+        return _FakeContext()
+
+
 def test_malformed_port_is_rejected():
     with pytest.raises(UrlPolicyError):
         canonicalize_url("https://example.com:not-a-port/")
@@ -75,12 +111,48 @@ async def test_browser_proxy_lease_matches_context_until_rotation():
     assert proxy == "http://proxy-a:8080"
     assert lease is not None
     await lease.succeed()
-
     engine.browser_manager.request_count = engine.browser_manager.MAX_REQUESTS_PER_CONTEXT
     proxy, lease = await engine._get_healthy_proxy()
     assert proxy == "http://proxy-b:8080"
     assert lease is not None
     await lease.succeed()
+
+
+async def test_open_browser_proxy_requests_safe_rotation():
+    config = _config(
+        use_playwright=True,
+        proxies=["http://proxy-a:8080", "http://proxy-b:8080"],
+        browser=BrowserConfig(proxy_rotation="per_context", context_max_requests=10),
+        proxy_failure_threshold=1,
+    )
+    engine = ScraperEngine(config)
+    assert engine.browser_manager is not None
+    engine.browser_manager._context_proxy = "http://proxy-a:8080"
+    failed = await engine.proxy_health.try_acquire("http://proxy-a:8080")
+    assert failed is not None
+    await failed.fail()
+
+    proxy, lease = await engine._get_healthy_proxy()
+
+    assert proxy == "http://proxy-b:8080"
+    assert lease is not None
+    assert engine.browser_manager.context_rotation_due is True
+    await lease.succeed()
+
+
+async def test_requested_rotation_replaces_context_with_selected_proxy():
+    manager = BrowserManager(_config(use_playwright=True))
+    manager.browser = _FakeBrowser()
+    old_context = _FakeContext()
+    manager.context = old_context
+    manager._context_proxy = "http://proxy-a:8080"
+    manager.request_context_rotation()
+
+    await manager.fetch_page("https://example.com/", proxy="http://proxy-b:8080")
+
+    assert old_context.closed is True
+    assert manager.current_proxy == "http://proxy-b:8080"
+    assert manager.request_count == 1
 
 
 async def test_robots_deny_policy_and_origin_bound():

@@ -285,16 +285,21 @@ class ScraperEngine:
             actual_proxy = self.browser_manager.current_proxy
             if self.proxy_health:
                 # A shared context cannot change proxy mid-life. If its
-                # circuit is currently open, use the existing context without
-                # attributing the outcome to a different proxy; rotation will
-                # select a healthy proxy at the next safe boundary.
+                # circuit is currently open, request a safe rotation and let
+                # the fallback select the proxy for the replacement context.
                 lease = await self.proxy_health.try_acquire(actual_proxy)
                 if lease is not None:
                     return actual_proxy, lease
+                self.browser_manager.request_context_rotation()
                 logger.warning(
-                    "Current browser context proxy is circuit-open; preserving context identity until rotation"
+                    "Current browser context proxy is circuit-open; requesting safe context rotation"
                 )
-            return actual_proxy, None
+                # Fall through so the next healthy proxy is selected for the
+                # new context. If every proxy is open, the fallback below
+                # returns direct transport and the old context is still
+                # replaced before the request starts.
+            else:
+                return actual_proxy, None
         if not self.proxy_health or not self.proxy_values:
             return self._get_next_proxy(), None
         for _ in range(len(self.proxy_values)):

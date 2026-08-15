@@ -259,6 +259,13 @@ class CheckpointManager:
             return {}
 
     def is_done(self, url: str, kind: Optional[str] = None) -> bool:
+        """Return completion state, preferably scoped to a semantic kind.
+
+        Passing ``kind`` is required for typed resume decisions.  The
+        URL-only form is retained for legacy callers and means that *any*
+        completed kind for the URL makes the result true; it must not be used
+        to decide whether a root, pagination, or nested item is complete.
+        """
         if kind:
             return (url, kind) in self._cache
         return url in self._done_urls

@@ -2,8 +2,9 @@
 
 Every origin's robots.txt is fetched through ``_fetch_page`` (purpose=ROBOTS),
 so it inherits URL policy validation, proxies, rate limiting, and retries.
-A missing, unparseable, or network-failing robots.txt is treated as allow-all
-(permissive) and logged — a transient robots failure must not block a crawl.
+A missing, unparseable, or network-failing robots.txt follows the configured
+failure policy: ``allow`` preserves availability-oriented allow-all behavior,
+while ``deny`` blocks the affected origin. Failures are logged.
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ class RobotsCache:
                 del self._locks[host]
 
     async def can_fetch(self, url: str, parent_url: Optional[str] = None) -> bool:
-        """Origin-cached robots check. Returns True (allow) on any fetch/parse failure."""
+        """Origin-cached robots check honoring the configured failure policy."""
         from engine.network import origin
 
         host = origin(url)
@@ -103,19 +104,19 @@ class RobotsCache:
         try:
             result = await self._fetcher(robots_url, RequestPurpose.ROBOTS, None)
         except Exception as exc:
-            logger.warning(f"Robots fetch failed for {host}: {exc}. Allowing.")
+            logger.warning(f"Robots fetch failed for {host}: {exc}. Applying {self.failure_policy} policy.")
             return _RobotsEntry(None, time.monotonic())
         if result.error is not None:
-            logger.warning(f"Robots fetch error for {host}: {result.error}. Allowing.")
+            logger.warning(f"Robots fetch error for {host}: {result.error}. Applying {self.failure_policy} policy.")
             return _RobotsEntry(None, time.monotonic())
         if not (200 <= result.status_code < 300):
-            logger.info(f"Robots {result.status_code} for {host}. Allowing.")
+            logger.info(f"Robots {result.status_code} for {host}. Applying {self.failure_policy} policy.")
             return _RobotsEntry(None, time.monotonic())
 
         parser = urllib.robotparser.RobotFileParser()
         try:
             parser.parse(result.content.splitlines())
         except Exception as exc:
-            logger.warning(f"Robots parse failed for {host}: {exc}. Allowing.")
+            logger.warning(f"Robots parse failed for {host}: {exc}. Applying {self.failure_policy} policy.")
             return _RobotsEntry(None, time.monotonic())
         return _RobotsEntry(parser, time.monotonic())

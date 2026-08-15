@@ -48,8 +48,10 @@ class BrowserManager:
         self.request_count = 0
         self.MAX_REQUESTS_PER_CONTEXT = config.browser.context_max_requests
         self._context_lock = asyncio.Lock()
+        self._context_condition = asyncio.Condition(self._context_lock)
         self._active_requests = 0
         self._context_proxy: Optional[str] = None
+        self._rotation_requested = False
 
     @property
     def current_proxy(self) -> Optional[str]:
@@ -62,8 +64,21 @@ class BrowserManager:
         return (
             self.config.browser.proxy_rotation == "per_context"
             and self._active_requests == 0
-            and self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
+            and (
+                self._rotation_requested
+                or self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
+            )
         )
+
+    def request_context_rotation(self) -> None:
+        """Request a context swap at the next safe request boundary.
+
+        Playwright binds a proxy to a context for its entire lifetime.  This
+        flag lets the scraper defer a proxy change until all requests using
+        the current context have finished.
+        """
+        if self.config.browser.proxy_rotation == "per_context":
+            self._rotation_requested = True
     
     async def start(self, proxy: Optional[str] = None):
         if self.playwright: return
@@ -166,6 +181,7 @@ class BrowserManager:
         await self._install_request_guard(self.context)
         self.request_count = 0
         self._context_proxy = proxy
+        self._rotation_requested = False
 
     async def close(self):
         if self.context:
@@ -288,21 +304,36 @@ class BrowserManager:
 
         # Rotation is decision-only here; the actual swap happens under the
         # lock at the top of the next fetch, never mid-request.
-        async with self._context_lock:
-            if (
+        async with self._context_condition:
+            # A circuit-open proxy requests rotation.  Wait for any requests
+            # already using the old context, then swap before admitting this
+            # request so it cannot intentionally reuse the unhealthy proxy.
+            while self._rotation_requested and self._active_requests > 0:
+                await self._context_condition.wait()
+            if self._rotation_requested or (
                 self._active_requests == 0
                 and self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
             ):
-                await self._create_context(proxy=proxy or self._context_proxy)
+                # A health-triggered rotation may intentionally pass None to
+                # escape an all-open proxy pool. Ordinary request-cap
+                # rotation preserves the current proxy for direct callers
+                # that do not provide a replacement.
+                replacement_proxy = (
+                    proxy
+                    if self._rotation_requested
+                    else proxy or self._context_proxy
+                )
+                await self._create_context(proxy=replacement_proxy)
             context = self.context
             self._active_requests += 1
 
         try:
             return await self._fetch_with_context(context, url, headers, method, body, body_type)
         finally:
-            async with self._context_lock:
+            async with self._context_condition:
                 self._active_requests -= 1
                 self.request_count += 1
+                self._context_condition.notify_all()
 
     async def _fetch_with_context(
         self,

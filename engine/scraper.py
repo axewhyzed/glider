@@ -6,7 +6,7 @@ import time
 import aiofiles
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Any, Optional, List, Callable, Awaitable, cast, Tuple
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Callable, Awaitable, cast, Tuple, Set
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 from itertools import cycle
 
@@ -40,6 +40,7 @@ from engine.run import RunContext
 from engine.sitemap import discover_sitemap
 from engine.limits import DomainRateLimitPolicy, DomainRateLimiter
 from engine.proxies import ProxyCircuitBreaker, ProxyHealthPolicy, ProxyLease
+from engine.cookies import ScopedCookies, load_scoped_cookies
 
 if TYPE_CHECKING:
     from engine.writer import JsonlStreamWriter
@@ -95,6 +96,7 @@ class ScraperEngine:
         self.browser_manager = None
         self.robots_cache: Optional[RobotsCache] = None
         self.session: Optional[AsyncSession] = None
+        self.scoped_cookies = ScopedCookies()
         
         self.data_lock = asyncio.Lock() 
         self.bloom_path = run_context.bloom_path if run_context else Path("data") / f"{config.name.replace(' ', '_').lower()}.bloom"
@@ -127,6 +129,7 @@ class ScraperEngine:
         
         self.batch_size = 10
         self.pending_batch: List[Dict[str, Any]] = []
+        self._flush_lock = asyncio.Lock()
         self.shutdown_requested = False
         self.limit = limit
         self.url_policy = UrlPolicy(config.url_policy)
@@ -136,9 +139,19 @@ class ScraperEngine:
         self.auth_token: Optional[str] = None
         self.token_expires_at: datetime = datetime.min
         self._auth_lock = asyncio.Lock() 
-        self.child_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._child_inflight: Dict[str, asyncio.Future] = {}
-        self.depth_first_seen: Dict[str, int] = {}
+        # Child results are reusable across parents, but the cache must not grow
+        # with an unbounded crawl.  Checkpointed child results remain the durable
+        # source of truth after an eviction.
+        self.child_cache: OrderedDict[Tuple[str, str], Dict[str, Any]] = OrderedDict()
+        self._child_cache_limit = max(1, config.max_nested_urls * max(1, config.concurrency))
+        # Include the nested field schema in the key: the same URL can be
+        # requested by different nested fields that expect different shapes.
+        self._child_inflight: Dict[Tuple[str, str], asyncio.Future] = {}
+        # Cycle detection is branch-local (see _process_content); retaining a
+        # process-global first-seen map incorrectly turns cross-root revisits
+        # into cycles and grows without bound.
+        self._unexpected_error: Optional[BaseException] = None
+        self._has_progress = False
         self._failure_tasks: set[asyncio.Task] = set()
         from engine.metrics import MetricsCollector
         self.metrics = MetricsCollector()
@@ -146,6 +159,8 @@ class ScraperEngine:
 
     async def run(self):
         logger.info(f"🚀 Starting Engine for: {self.config.name}")
+        state = "running"
+        run_error: Optional[BaseException] = None
         try:
             await self._setup_resources()
 
@@ -170,22 +185,46 @@ class ScraperEngine:
                     resume_url = incomplete_urls[0]
                     logger.info(f"🔁 Resuming pagination from checkpoint: {resume_url}")
                 await self._run_pagination_mode(resume_url=resume_url)
+
+            if self._unexpected_error is not None:
+                raise RuntimeError("an unexpected worker error stopped the crawl") from self._unexpected_error
             
             await self._flush_remaining_batches()
 
         except asyncio.CancelledError:
             logger.warning("⚠️ Shutdown requested - flushing data...")
             self.shutdown_requested = True  # P9.5: honest manifest state
-            await self._flush_remaining_batches()
+            state = "cancelled"
+            try:
+                await self._flush_remaining_batches()
+            except Exception:
+                logger.exception("Failed to flush remaining data during cancellation")
+            raise
+        except Exception as exc:
+            run_error = exc
+            # A fatal run-level error is failed when no useful work completed,
+            # and partial when the run produced progress before aborting.
+            state = "partial" if self._has_progress or self.pending_batch else "failed"
+            logger.exception("Run failed unexpectedly")
             raise
         finally:
-            await self._cleanup_resources()
+            cleanup_errors = await self._cleanup_resources()
+            if cleanup_errors and state not in {"cancelled", "failed"}:
+                state = "partial" if self._has_progress else "failed"
             if self.run_context:
-                self.run_context.update_manifest(
-                    state="cancelled" if self.shutdown_requested else "completed",
-                    finished_at=datetime.utcnow().isoformat() + "Z",
-                    failed_urls=int(self.failed_urls),
-                )
+                updates: Dict[str, Any] = {
+                    "state": state if state != "running" else "completed",
+                    "finished_at": datetime.utcnow().isoformat() + "Z",
+                    "failed_urls": int(self.failed_urls),
+                }
+                if run_error is not None:
+                    updates["error"] = redact_text(str(run_error))[:500]
+                if cleanup_errors:
+                    updates["cleanup_errors"] = [redact_text(error)[:300] for error in cleanup_errors]
+                try:
+                    self.run_context.update_manifest(**updates)
+                except Exception:
+                    logger.exception("Failed to finalize run manifest")
             logger.success("✅ Finished!")
 
     async def _setup_resources(self):
@@ -234,33 +273,72 @@ class ScraperEngine:
             except Exception as e:
                 logger.error(f"❌ Failed to load cookies: {e}")
 
-        self.session = AsyncSession(
-            impersonate=cast(Any, browser_choice),
-            cookies=cookies if cookies else None
-        )
+        try:
+            scope_url = (
+                str(self.config.base_url)
+                if self.config.base_url
+                else (str(self.config.start_urls[0]) if self.config.start_urls else None)
+            )
+            self.scoped_cookies = load_scoped_cookies(self.config.cookies_file, scope_url) if self.config.cookies_file else ScopedCookies()
+            logger.info(f"Loaded {len(self.scoped_cookies.pairs)} origin-scoped cookies")
+        except Exception as exc:
+            self.scoped_cookies = ScopedCookies()
+            logger.error(f"Failed to load cookies: {exc}")
 
-    async def _cleanup_resources(self):
+        # Do not seed curl_cffi's global cookie jar: domain-less cookies could
+        # be sent to an unrelated origin during a cross-origin crawl.
+        self.session = AsyncSession(impersonate=cast(Any, browser_choice))
+
+    def _add_scoped_cookie_header(self, headers: Dict[str, str], url: str) -> Dict[str, str]:
+        """Add configured cookies only when the request stays on their origin."""
+        cookie_header = self.scoped_cookies.header_for(url)
+        if not cookie_header or any(key.lower() == "cookie" for key in headers):
+            return headers
+        enriched = dict(headers)
+        enriched["Cookie"] = cookie_header
+        return enriched
+
+    async def _cleanup_resources(self) -> List[str]:
+        errors: List[str] = []
         if self._failure_tasks:
-            await asyncio.gather(*self._failure_tasks, return_exceptions=True)
+            results = await asyncio.gather(*self._failure_tasks, return_exceptions=True)
+            errors.extend(str(result) for result in results if isinstance(result, BaseException))
         if not self.dry_run:
-            try: self.seen_hashes.save(self.bloom_path)
-            except Exception: pass
-        await self.checkpoint.close()
-        if self.browser_manager: await self.browser_manager.close()
-        if self.session: await self.session.close()
-        if self.stream_writer: await self.stream_writer.close()
+            try:
+                self.seen_hashes.save(self.bloom_path)
+            except Exception as exc:
+                errors.append(f"dedupe save: {exc}")
+
+        # Each resource is independent.  A failure in checkpoint, browser, or
+        # session cleanup must not prevent the writer (or later resources) from
+        # being closed.
+        async def close_one(label: str, close_fn: Callable[[], Awaitable[None]]) -> None:
+            try:
+                await close_fn()
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+                logger.exception("Failed to close %s", label)
+
+        await close_one("checkpoint", self.checkpoint.close)
+        if self.browser_manager:
+            await close_one("browser", self.browser_manager.close)
+        if self.session:
+            await close_one("session", self.session.close)
+        if self.stream_writer:
+            await close_one("stream writer", self.stream_writer.close)
+        return errors
 
     async def preview(self, url: Optional[str] = None) -> Tuple[FetchResult, Dict[str, Any]]:
         """Fetch and extract one page without creating durable crawl artifacts."""
-        target = url
-        if not target:
-            target = str(self.config.base_url) if self.config.base_url else None
-        if not target and self.config.start_urls:
-            target = str(self.config.start_urls[0])
-        if not target:
-            raise ValueError("A preview URL is required for list configurations")
-        await self._setup_resources()
         try:
+            target = url
+            if not target:
+                target = str(self.config.base_url) if self.config.base_url else None
+            if not target and self.config.start_urls:
+                target = str(self.config.start_urls[0])
+            if not target:
+                raise ValueError("A preview URL is required for list configurations")
+            await self._setup_resources()
             result = await self._fetch_page(target, purpose=RequestPurpose.ROOT)
             if result.error is not None:
                 raise result.error
@@ -274,6 +352,30 @@ class ScraperEngine:
 
     def _get_next_proxy(self) -> Optional[str]:
         return next(self.proxy_pool) if self.proxy_pool else None
+
+    async def _reconcile_browser_proxy(
+        self, proxy: Optional[str], lease: Optional[ProxyLease]
+    ) -> Tuple[Optional[str], Optional[ProxyLease]]:
+        """Ensure a browser lease describes the proxy actually bound to context."""
+        if not self.browser_manager or self.config.browser.proxy_rotation != "per_context":
+            return proxy, lease
+        # Unit callers may exercise proxy selection without starting Playwright.
+        # There is no live context to reconcile in that mode; preserve the
+        # selected lease and let the real fetch path bind it once started.
+        if self.browser_manager.browser is None:
+            return proxy, lease
+        actual = await self.browser_manager.ensure_context_proxy(proxy)
+        if actual == proxy:
+            return actual, lease
+        if lease:
+            await lease.abandon()
+        if actual and self.proxy_health:
+            actual_lease = await self.proxy_health.try_acquire(actual)
+            if actual_lease is not None:
+                return actual, actual_lease
+            self.browser_manager.request_context_rotation()
+            return None, None
+        return actual, None
 
     async def _get_healthy_proxy(self) -> Tuple[Optional[str], Optional[ProxyLease]]:
         if (
@@ -308,7 +410,12 @@ class ScraperEngine:
                 return None, None
             lease = await self.proxy_health.try_acquire(proxy)
             if lease is not None:
-                return proxy, lease
+                return await self._reconcile_browser_proxy(proxy, lease)
+        if self.browser_manager and self.browser_manager.context_rotation_due:
+            # A request-cap rotation must not preserve a proxy that has become
+            # circuit-open while the previous context was draining. Passing
+            # None to the browser manager intentionally selects direct mode.
+            self.browser_manager.request_context_rotation()
         logger.warning("All configured proxies are currently circuit-open; using direct transport")
         return None, None
 
@@ -377,6 +484,8 @@ class ScraperEngine:
                     # _process_url has its own broad try/except; if something truly
                     # unexpected bubbles up (e.g. lock error), log it but keep the
                     # worker alive so other URLs can still be processed.
+                    if self._unexpected_error is None:
+                        self._unexpected_error = e
                     logger.exception(f"Unexpected worker error on URL {url}: {e}")
                 finally:
                     queue.task_done()
@@ -504,6 +613,7 @@ class ScraperEngine:
                     raise FetchError(ErrorCategory.VALIDATION, url, validation_failure)
                 await self._merge_data(data, source_url=result.final_url)
                 await self.checkpoint.mark_done(url, kind="root")
+                self._has_progress = True
                 self._record_sample(
                     origin(url), "root", result.status_code,
                     result.elapsed_ms, result.attempts, "success", url,
@@ -580,6 +690,9 @@ class ScraperEngine:
             self._is_allowed,
             max_urls=self.config.sitemap_max_urls,
             max_depth=self.config.sitemap_max_depth,
+            max_documents=self.config.sitemap_max_documents,
+            max_queue=self.config.sitemap_max_queue,
+            max_bytes=self.config.sitemap_max_bytes,
         )
 
     async def _run_pagination_mode(self, resume_url: Optional[str] = None):
@@ -609,9 +722,13 @@ class ScraperEngine:
                 if not content: raise Exception("Empty")
                 
                 data, resolver = await self._process_content(content, result.final_url)
+                validation_failure = self._validate_extraction(data)
+                if validation_failure:
+                    raise FetchError(ErrorCategory.VALIDATION, current_url, validation_failure)
                 await self._merge_data(data, source_url=result.final_url)
                 
                 await self.checkpoint.mark_done(current_url, kind="pagination")
+                self._has_progress = True
                 self._record_sample(
                     origin(current_url), "pagination", result.status_code,
                     result.elapsed_ms, result.attempts, "success", current_url,
@@ -622,7 +739,7 @@ class ScraperEngine:
                 if self.config.pagination and pages < max_pages:
                     next_link = resolver.get_attribute(self.config.pagination.selector, "href")
                     if next_link:
-                        next_url = self._build_next_url(current_url, next_link)
+                        next_url = self._build_next_url(result.final_url, next_link)
                         if next_url:
                             current_url = next_url
                             await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
@@ -654,18 +771,33 @@ class ScraperEngine:
                 if self.stats_callback: self.stats_callback(StatsEvent("page_error"))
                 break
 
+    @staticmethod
+    def _crawl_key(url: str) -> str:
+        try:
+            return canonicalize_url(url)
+        except UrlPolicyError:
+            return url
+
+    def _cache_child(self, key: Tuple[str, str], value: Dict[str, Any]) -> None:
+        self.child_cache[key] = dict(value)
+        self.child_cache.move_to_end(key)
+        while len(self.child_cache) > self._child_cache_limit:
+            self.child_cache.popitem(last=False)
+
     async def _process_content(
         self,
         content: str,
         url: str = "",
         fields: Optional[List[DataField]] = None,
         depth: int = 0,
+        ancestry: Optional[Set[str]] = None,
     ) -> Tuple[Dict[str, Any], Any]:
         current_fields = fields or self.config.fields
-        # Register this page's URL at its own depth so revisiting it deeper is
-        # recognized as a cycle.
+        # Cycle detection is scoped to this recursion branch.  A URL visited by
+        # another root or sibling branch is a valid shared child, not a cycle.
+        branch_ancestry = set(ancestry or ())
         if url:
-            self.depth_first_seen.setdefault(url, depth)
+            branch_ancestry.add(self._crawl_key(url))
         try:
             if self.config.response_type == "json":
                  resolver = JsonResolver(content)
@@ -718,16 +850,13 @@ class ScraperEngine:
                     if not await self._is_allowed(full_child_url, parent_url=url):
                         continue
 
-                    # Cycle detection: same canonical URL revisited at a STRICTLY
-                    # greater depth than its first sighting is a cycle — stop the
-                    # branch (attach cached result if present, else skip).
-                    first_seen = self.depth_first_seen.get(full_child_url)
                     child_depth = depth + 1
-                    if first_seen is not None and child_depth > first_seen:
+                    child_key = self._crawl_key(full_child_url)
+                    if child_key in branch_ancestry:
                         logger.debug(f"Cycle detected at {full_child_url} (depth {child_depth})")
                         if self.stats_callback: self.stats_callback(StatsEvent("cycle_detected"))
                         continue
-                    self.depth_first_seen.setdefault(full_child_url, child_depth)
+                    child_ancestry = branch_ancestry | {child_key}
 
                     try:
                         cache_key = (
@@ -738,6 +867,7 @@ class ScraperEngine:
                         cache_key = (full_child_url, field.name)
                     cached_child = self.child_cache.get(cache_key)
                     if cached_child is not None:
+                        self.child_cache.move_to_end(cache_key)
                         child_data = dict(cached_child)
                         child_data["_source_url"] = full_child_url
                         child_data["_parent_url"] = url
@@ -759,12 +889,14 @@ class ScraperEngine:
                                 continue
 
                     # Inflight dedup: two workers hitting the same child await one fetch.
-                    inflight = self._child_inflight.get(full_child_url)
+                    inflight_key = cache_key
+                    inflight = self._child_inflight.get(inflight_key)
                     if inflight is not None:
                         try:
                             child_data = await inflight
                         except Exception as exc:
                             logger.warning(f"Inflight child {full_child_url} failed: {exc}")
+                            nested_failures.append(full_child_url)
                             continue
                         if child_data is not None:
                             child_data = dict(child_data)
@@ -774,7 +906,12 @@ class ScraperEngine:
                         continue
 
                     future = asyncio.get_running_loop().create_future()
-                    self._child_inflight[full_child_url] = future
+                    future.add_done_callback(
+                        lambda done: done.exception()
+                        if not done.cancelled() and done.exception() is not None
+                        else None
+                    )
+                    self._child_inflight[inflight_key] = future
                     try:
                         await self.checkpoint.mark_in_progress(
                             full_child_url, kind="nested", parent_url=url, depth=child_depth
@@ -794,38 +931,64 @@ class ScraperEngine:
                                 child_result.final_url,
                                 fields=field.nested_fields,
                                 depth=child_depth,
+                                ancestry=child_ancestry,
                             )
-                            self.child_cache[cache_key] = dict(child_data)
-                            await self.checkpoint.mark_child_result(
-                                full_child_url, url, cache_key[1], json.dumps(child_data, default=str)
+                        elif child_result.status_code == 204:
+                            # A deliberate no-content response is a completed
+                            # empty child, not abandoned checkpoint work.
+                            child_data = {}
+                        else:
+                            raise FetchError(
+                                ErrorCategory.PARSE,
+                                full_child_url,
+                                "empty nested response",
+                                status_code=child_result.status_code,
                             )
-                            future.set_result(dict(child_data))
-                            child_data["_source_url"] = full_child_url
-                            child_data["_parent_url"] = url
-                            nested_results_list.append(child_data)
-                            await self.checkpoint.mark_done(full_child_url, kind="nested")
-                            self._record_sample(
-                                origin(full_child_url), "nested", child_result.status_code,
-                                child_result.elapsed_ms, child_result.attempts, "success", full_child_url,
-                            )
-                            if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
-                            # Polite delay between child-page requests to avoid hammering the server
-                            await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
+
+                        self._cache_child(cache_key, child_data)
+                        await self.checkpoint.mark_child_result(
+                            full_child_url, url, cache_key[1], json.dumps(child_data, default=str)
+                        )
+                        future.set_result(dict(child_data))
+                        child_data["_source_url"] = full_child_url
+                        child_data["_parent_url"] = url
+                        nested_results_list.append(child_data)
+                        await self.checkpoint.mark_done(full_child_url, kind="nested")
+                        self._record_sample(
+                            origin(full_child_url), "nested", child_result.status_code,
+                            child_result.elapsed_ms, child_result.attempts, "success", full_child_url,
+                        )
+                        if self.stats_callback: self.stats_callback(StatsEvent("page_success"))
+                        # Polite delay between child-page requests to avoid hammering the server
+                        await asyncio.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
 
                     except FetchError as e:
                         logger.warning(f"Failed to follow {full_child_url}: {e}")
                         await self.checkpoint.mark_failed(full_child_url, kind="nested", error=e.category.value)
                         nested_failures.append(full_child_url)
+                        if not future.done():
+                            future.set_exception(e)
                         self._record_sample(
                             origin(full_child_url), "nested", getattr(e, "status_code", 0) or 0,
                             getattr(e, "elapsed_ms", 0.0), getattr(e, "attempts", 1), e.category.value, full_child_url,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to follow {full_child_url}: {e}")
+                        internal_error = FetchError(
+                            ErrorCategory.INTERNAL,
+                            full_child_url,
+                            str(e),
+                            cause=e,
+                        )
+                        await self.checkpoint.mark_failed(
+                            full_child_url, kind="nested", error=internal_error.category.value
+                        )
                         nested_failures.append(full_child_url)
+                        if not future.done():
+                            future.set_exception(internal_error)
                         self._record_sample(origin(full_child_url), "nested", 0, 0.0, 1, "internal_error", full_child_url)
                     finally:
-                        self._child_inflight.pop(full_child_url, None)
+                        self._child_inflight.pop(inflight_key, None)
                         if not future.done():
                             future.set_result(None)
 
@@ -852,6 +1015,8 @@ class ScraperEngine:
             debug_dir.mkdir(parents=True, exist_ok=True)
 
             # Cap by file count (keep newest).
+            if snap_config.max_files <= 0:
+                return
             existing = sorted(debug_dir.glob("fail_*.html"), key=lambda p: p.stat().st_mtime)
             while len(existing) >= snap_config.max_files:
                 oldest = existing.pop(0)
@@ -912,11 +1077,18 @@ class ScraperEngine:
         computed (in which case the record is emitted — never dropped).
         """
         mode = self.config.dedup.mode
-        if mode == "none":
-            return None
         try:
+            if mode == "none":
+                return None
             if mode == "url":
-                return source_url or ""
+                if source_url:
+                    return source_url
+                # Direct callers and a few list-mode paths may not have a
+                # source URL. Fall back to content identity instead of
+                # collapsing every such record onto one empty key.
+                return hashlib.md5(
+                    json.dumps(page_data, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()
             if mode == "fields":
                 subset = {k: page_data[k] for k in self.config.dedup.fields if k in page_data}
                 return hashlib.md5(
@@ -939,43 +1111,42 @@ class ScraperEngine:
             # No dedup configured (or un-hashable) -> emit unconditionally.
             async with self.data_lock:
                 self.pending_batch.append(page_data)
-            await self._flush_remaining_batches()
+            await self._flush_pending(force=True)
             return
 
-        # Exact set is the authority: a Bloom false positive must never drop data.
-        if key in self.exact_seen:
+        # Reserve the key and append the record under one lock. Without this
+        # atomic section, concurrent workers can all pass the duplicate check
+        # before any of them inserts into the exact set.
+        async with self.data_lock:
+            if key in self.exact_seen:
+                duplicate = True
+                should_flush = False
+            else:
+                duplicate = False
+                self.seen_hashes.add(key)
+                # Bounded LRU: evict oldest when at capacity (Bloom still
+                # gates duplicates across resumed runs as a fast path).
+                self.exact_seen[key] = None
+                if len(self.exact_seen) > self.config.dedup.exact_capacity:
+                    self.exact_seen.popitem(last=False)
+                self.pending_batch.append(page_data)
+                should_flush = len(self.pending_batch) >= self.batch_size
+
+        if duplicate:
             logger.debug(f"Skipped duplicate entry: {key[:8]}")
             self.metrics.record_duplicate()
-            if self.stats_callback: self.stats_callback(StatsEvent("page_skipped"))
+            if self.stats_callback:
+                self.stats_callback(StatsEvent("page_skipped"))
             return
 
-        if key in self.seen_hashes:
-            # Bloom says "maybe present" — confirm against the exact set.
-            if key in self.exact_seen:
-                self.metrics.record_duplicate()
-                if self.stats_callback: self.stats_callback(StatsEvent("page_skipped"))
-                return
-            # Bloom false positive: emit (correctness wins over memory).
-
-        self.seen_hashes.add(key)
-        # Bounded LRU: evict oldest when at capacity (Bloom still gates dupes).
-        self.exact_seen[key] = None
-        if len(self.exact_seen) > self.config.dedup.exact_capacity:
-            self.exact_seen.popitem(last=False)
+        # A checkpointed run must not persist a dedup key before its record is
+        # durable: otherwise a writer failure can make resume skip unwritten
+        # data permanently. The checkpointed path therefore uses a write fence.
+        if self.checkpoint.enabled:
+            await self._flush_pending(force=True)
+        elif should_flush:
+            await self._flush_pending(force=False)
         await self.checkpoint.mark_dedup_key(key, self.config.dedup.exact_capacity)
-
-        batch_to_flush: List[Dict[str, Any]] = []
-        async with self.data_lock:
-            self.pending_batch.append(page_data)
-            if len(self.pending_batch) >= self.batch_size:
-                batch_to_flush = self.pending_batch.copy()
-                self.pending_batch = []
-        
-        if batch_to_flush:
-            await self._flush_batch(batch_to_flush)
-            if self.stats_callback:
-                item_count = sum(self._count_items(item) for item in batch_to_flush)
-                self.stats_callback(StatsEvent("entries_added", count=item_count))
 
     async def _flush_batch(self, batch: List[Dict[str, Any]]):
         if not batch:
@@ -985,15 +1156,42 @@ class ScraperEngine:
         elif self.output_callback:
             await self.output_callback({"items": batch})
 
-    async def _flush_remaining_batches(self):
-        async with self.data_lock:
-            batch = self.pending_batch.copy()
-            self.pending_batch = []
-        if batch:
-            await self._flush_batch(batch)
+    async def _flush_pending(self, force: bool = False) -> None:
+        """Flush a stable prefix without removing it until the write succeeds.
+
+        Keeping the prefix in ``pending_batch`` until the durable write is
+        acknowledged makes cancellation lossless. The flush lock prevents
+        concurrent workers from writing the same prefix twice.
+        """
+        async with self._flush_lock:
+            async with self.data_lock:
+                if not self.pending_batch:
+                    return
+                if not force and len(self.pending_batch) < self.batch_size:
+                    return
+                batch = self.pending_batch.copy()
+
+            flush_task = asyncio.create_task(self._flush_and_ack(batch))
+            try:
+                await asyncio.shield(flush_task)
+            except asyncio.CancelledError:
+                # Complete the protected write/ack before propagating
+                # cancellation so the caller's shutdown flush sees a stable
+                # state and cannot lose records.
+                await flush_task
+                raise
+
             if self.stats_callback:
                 item_count = sum(self._count_items(item) for item in batch)
                 self.stats_callback(StatsEvent("entries_added", count=item_count))
+
+    async def _flush_and_ack(self, batch: List[Dict[str, Any]]) -> None:
+        await self._flush_batch(batch)
+        async with self.data_lock:
+            del self.pending_batch[:len(batch)]
+
+    async def _flush_remaining_batches(self):
+        await self._flush_pending(force=True)
 
     async def ensure_active_token(self):
         if not self.config.authentication: return
@@ -1042,7 +1240,7 @@ class ScraperEngine:
                         "password": auth_config.password or "",
                         "scope": auth_config.scope or "*"
                     }
-                    current_proxy = self._get_next_proxy()
+                    current_proxy, proxy_lease = await self._get_healthy_proxy()
                     proxies = {"http": current_proxy, "https": current_proxy} if current_proxy else None
 
                     token_headers = self.url_policy.headers_for(
@@ -1053,20 +1251,45 @@ class ScraperEngine:
                     token_headers["User-Agent"] = self.ua_rotator.random
                     token_headers["Accept"] = "application/json"
 
-                    async with self.rate_limiter:
-                        response = await self.session.post(
-                            token_url,
-                            auth=(client_id, client_secret),
-                            data=payload,
-                            proxies=cast(Any, proxies),
-                            headers=token_headers,
-                        )
+                    try:
+                        async with self.rate_limiter:
+                            response = await self.session.post(
+                                token_url,
+                                auth=(client_id, client_secret),
+                                data=payload,
+                                proxies=cast(Any, proxies),
+                                headers=token_headers,
+                                timeout=self.config.request_timeout,
+                                allow_redirects=False,
+                            )
+                        # Any complete HTTP response means the proxy carried
+                        # the request successfully, including an auth error.
+                        if proxy_lease:
+                            await proxy_lease.succeed()
+                    except BaseException:
+                        if proxy_lease:
+                            await proxy_lease.fail()
+                        raise
 
+                    if 300 <= int(response.status_code) < 400:
+                        raise AuthError(
+                            token_url,
+                            "token endpoint redirects are not permitted",
+                        )
                     if response.status_code == 200:
                         data = response.json()
-                        self.auth_token = data.get("access_token")
+                        token = data.get("access_token") if isinstance(data, dict) else None
+                        if not isinstance(token, str) or not token.strip():
+                            raise AuthError(token_url, "token endpoint returned no access_token")
                         expires_in = data.get("expires_in", 3600)
-                        self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+                        try:
+                            expires_seconds = float(expires_in)
+                        except (TypeError, ValueError) as exc:
+                            raise AuthError(token_url, "token endpoint returned invalid expires_in", cause=exc)
+                        if expires_seconds <= 0:
+                            raise AuthError(token_url, "token endpoint returned non-positive expires_in")
+                        self.auth_token = token
+                        self.token_expires_at = datetime.now() + timedelta(seconds=expires_seconds)
                         logger.success(f"✅ Token Refreshed! Expires in {expires_in}s")
                     else:
                         logger.error(f"❌ Auth Failed: {response.status_code} - {response.text}")
@@ -1102,7 +1325,6 @@ class ScraperEngine:
         started = time.perf_counter()
         retry_config = self.config.retry
         credential_origin = origin(requested_url)
-
         def _failed(error: FetchError) -> FetchResult:
             error.elapsed_ms = (time.perf_counter() - started) * 1000
             return FetchResult(
@@ -1117,6 +1339,10 @@ class ScraperEngine:
             )
 
         for attempt in range(1, retry_config.max_attempts + 1):
+            # Redirect handling may change POST to GET for one attempt. Never
+            # carry that redirect-specific mutation into a retry.
+            request_method = self.config.request_method
+            request_body = self.config.request_body
             if self.config.authentication:
                 try:
                     await self.ensure_active_token()
@@ -1137,14 +1363,16 @@ class ScraperEngine:
                 bearer_token=self.auth_token,
                 credential_origin=credential_origin,
             )
+            headers = self._add_scoped_cookie_header(headers, current_url)
             headers["User-Agent"] = self.ua_rotator.random
-            if self.config.request_method == "POST":
+            if request_method == "POST":
                 headers.setdefault(
                     "Content-Type",
                     "application/json" if self.config.request_body_type == "json"
                     else "application/x-www-form-urlencoded",
                 )
             current_proxy, proxy_lease = await self._get_healthy_proxy()
+            proxy_lease_outcome = "failure"
 
             try:
                 if self.browser_manager:
@@ -1154,10 +1382,14 @@ class ScraperEngine:
                             headers=headers,
                             proxy=current_proxy,
                             worker_id=0,
-                            method=self.config.request_method,
-                            body=self.config.request_body,
+                            method=request_method,
+                            body=request_body,
                             body_type=self.config.request_body_type,
                         ))
+                    # A FetchResult means the proxy transported a complete
+                    # browser response; HTTP/application failures must not
+                    # poison proxy health.
+                    proxy_lease_outcome = "success"
                     result.requested_url = requested_url
                     result.redirect_chain = redirect_chain
                     result.attempts = attempt
@@ -1189,7 +1421,7 @@ class ScraperEngine:
                         ))
                     await asyncio.sleep(retry_after if retry_after is not None else backoff_seconds(attempt, retry_config))
                     if proxy_lease:
-                        await proxy_lease.fail()
+                        await proxy_lease.succeed()
                     continue
 
                 if not self.session:
@@ -1206,17 +1438,18 @@ class ScraperEngine:
                     "headers": headers,
                     "allow_redirects": False,
                 }
-                if self.config.request_method == "POST":
+                if request_method == "POST":
                     if self.config.request_body_type == "json":
-                        request_kwargs["json"] = self.config.request_body
+                        request_kwargs["json"] = request_body
                     else:
-                        request_kwargs["data"] = self.config.request_body
+                        request_kwargs["data"] = request_body
                 async def _send_initial() -> Any:
-                    if self.config.request_method == "POST":
+                    if request_method == "POST":
                         return await session.post(current_url, **request_kwargs)
                     return await session.get(current_url, **request_kwargs)
                 response = await self._limited_request(current_url, _send_initial)
                 status = int(response.status_code)
+                proxy_lease_outcome = "success"
                 response_headers = {str(k): str(v) for k, v in response.headers.items()}
 
                 if status in {301, 302, 303, 307, 308}:
@@ -1242,6 +1475,15 @@ class ScraperEngine:
                                 attempts=attempt,
                             )
                             return _failed(redirect_error)
+                        previous_method = request_method
+                        # RFC 9110 semantics: 303 always switches to GET;
+                        # 301/302 switch POST to GET for browser-compatible
+                        # redirect behavior; 307/308 preserve method and body.
+                        if status == 303 or (
+                            status in {301, 302} and request_method == "POST"
+                        ):
+                            request_method = "GET"
+                            request_body = None
                         redirect_chain.append(next_url)
                         current_url = next_url
                         # Re-fetch the redirect target within the same attempt.
@@ -1252,20 +1494,27 @@ class ScraperEngine:
                             bearer_token=self.auth_token,
                             credential_origin=credential_origin,
                         )
+                        hop_headers = self._add_scoped_cookie_header(hop_headers, current_url)
                         hop_headers["User-Agent"] = self.ua_rotator.random
+                        if previous_method == "POST" and request_method == "GET":
+                            hop_headers = {
+                                key: value
+                                for key, value in hop_headers.items()
+                                if key.lower() not in {"content-type", "content-length"}
+                            }
                         hop_kwargs = {
                             "timeout": self.config.request_timeout,
                             "proxies": proxies,
                             "headers": hop_headers,
                             "allow_redirects": False,
                         }
-                        if self.config.request_method == "POST":
+                        if request_method == "POST":
                             if self.config.request_body_type == "json":
-                                hop_kwargs["json"] = self.config.request_body
+                                hop_kwargs["json"] = request_body
                             else:
-                                hop_kwargs["data"] = self.config.request_body
+                                hop_kwargs["data"] = request_body
                         async def _send_hop() -> Any:
-                            if self.config.request_method == "POST":
+                            if request_method == "POST":
                                 return await session.post(current_url, **hop_kwargs)
                             return await session.get(current_url, **hop_kwargs)
                         response = await self._limited_request(current_url, _send_hop)
@@ -1312,24 +1561,29 @@ class ScraperEngine:
                     ))
                 await asyncio.sleep(retry_after if retry_after is not None else backoff_seconds(attempt, retry_config))
                 if proxy_lease:
-                    await proxy_lease.fail()
+                    await proxy_lease.succeed()
             except asyncio.CancelledError:
+                proxy_lease_outcome = "failure"
                 raise
             except FetchError as exc:
                 # Already classified (e.g. POLICY from a nested policy call).
+                proxy_lease_outcome = (
+                    "failure"
+                    if exc.category in {ErrorCategory.NETWORK, ErrorCategory.TIMEOUT}
+                    else "success"
+                )
                 if not exc.retryable or attempt >= retry_config.max_attempts:
-                    if proxy_lease:
-                        await proxy_lease.fail()
                     return _failed(exc)
-                if proxy_lease:
-                    await proxy_lease.fail()
                 await asyncio.sleep(backoff_seconds(attempt, retry_config))
             except Exception as exc:
                 from engine.errors import classify_exception
                 category = classify_exception(exc)
+                proxy_lease_outcome = (
+                    "failure"
+                    if category in {ErrorCategory.NETWORK, ErrorCategory.TIMEOUT}
+                    else "success"
+                )
                 if category in NON_RETRYABLE_CATEGORIES or attempt >= retry_config.max_attempts:
-                    if proxy_lease:
-                        await proxy_lease.fail()
                     return _failed(FetchError(
                         category,
                         current_url,
@@ -1339,7 +1593,17 @@ class ScraperEngine:
                     ))
                 logger.warning(f"Network Error ({purpose.value}): {exc}")
                 if proxy_lease:
-                    await proxy_lease.fail()
+                    await proxy_lease.succeed()
                 await asyncio.sleep(backoff_seconds(attempt, retry_config))
+            finally:
+                # Every acquired lease must be resolved, including early
+                # policy/redirect returns and task cancellation. The lease is
+                # idempotent, so this is safe after explicit success/failure
+                # resolution in the branches above.
+                if proxy_lease:
+                    if proxy_lease_outcome == "success":
+                        await proxy_lease.succeed()
+                    else:
+                        await proxy_lease.fail()
 
         raise RuntimeError(f"Unable to fetch {requested_url}")

@@ -347,10 +347,19 @@ def test_resolution_error_permissive_with_log(monkeypatch):
     def _raise(host, port):
         raise socket.gaierror("no such host")
     monkeypatch.setattr("engine.network.socket.getaddrinfo", _raise)
-    policy = UrlPolicy(UrlPolicyConfig())
-    # Documented residual risk: unresolved hosts are allowed.
+    policy = UrlPolicy(UrlPolicyConfig(dns_failure_policy="allow"))
+    # Compatibility opt-out: unresolved hosts may be allowed explicitly.
     assert policy.validate("http://nxdomain.invalid/x", parent_url="http://nxdomain.invalid/") \
         == "http://nxdomain.invalid/x"
+
+
+def test_resolution_error_denied_by_default(monkeypatch):
+    def _raise(host, port):
+        raise socket.gaierror("no such host")
+    monkeypatch.setattr("engine.network.socket.getaddrinfo", _raise)
+    policy = UrlPolicy(UrlPolicyConfig())
+    with pytest.raises(PrivateAddressError):
+        policy.validate("http://nxdomain.invalid/x", parent_url="http://nxdomain.invalid/")
 
 
 def test_resolve_dns_false_skips_dns(monkeypatch):

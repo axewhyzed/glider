@@ -86,6 +86,17 @@ SENSITIVE_HEADERS = {
 }
 
 
+def is_sensitive_header(name: str) -> bool:
+    """Recognize credential-bearing custom headers, not only standard names."""
+    normalized = name.lower().replace("_", "-")
+    if normalized in SENSITIVE_HEADERS:
+        return True
+    return any(
+        marker in normalized
+        for marker in ("authorization", "credential", "password", "secret", "token", "api-key")
+    )
+
+
 def canonicalize_url(url: str) -> str:
     parsed = urlsplit(str(url).strip())
     if not parsed.scheme or not parsed.netloc:
@@ -100,6 +111,8 @@ def canonicalize_url(url: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise UrlPolicyError(f"Invalid port in URL: {url}") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise UrlPolicyError(f"Invalid port in URL: {url}")
     default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
     # Rebuild netloc preserving IPv6 brackets.
     if ":" in hostname:
@@ -141,16 +154,16 @@ def _is_ip_literal(hostname: str) -> bool:
         return False
 
 
-def _host_resolves_to_private(hostname: str) -> bool:
-    """True when ANY resolved address for the hostname is private.
+def _host_resolves_to_private(hostname: str) -> Optional[bool]:
+    """Return whether ANY resolved address is private, or None on failure.
 
-    Resolution errors are permissive (return False): the literal-IP check
-    remains the primary guard and DNS rebinding is a documented residual risk.
+    Callers choose whether a resolution failure is allowed by policy; the
+    network primitive preserves the distinction instead of failing open.
     """
     try:
         infos = socket.getaddrinfo(hostname, None)
     except OSError:
-        return False
+        return None
     for info in infos:
         address = str(info[4][0])
         if _host_is_private(address):
@@ -180,13 +193,33 @@ class UrlPolicy:
         if self.config.block_private_networks and _host_is_private(hostname):
             raise PrivateAddressError(f"Private or local address is not allowed: {hostname}")
         if self.config.resolve_dns and not _is_ip_literal(hostname):
-            if _host_resolves_to_private(hostname):
+            resolved_private = _host_resolves_to_private(hostname)
+            if resolved_private is None and self.config.dns_failure_policy == "deny":
+                raise PrivateAddressError(
+                    f"DNS resolution failed for hostname: {hostname}"
+                )
+            if resolved_private:
                 raise PrivateAddressError(
                     f"Hostname resolves to a private address: {hostname}"
                 )
+        if self._domains and not self._is_allowed_domain(hostname):
+            raise UrlPolicyError(f"Hostname is not in allowed_domains: {hostname}")
         if parent_url and not self.is_allowed_origin(canonical, parent_url):
             raise UrlPolicyError(f"Cross-origin URL is not allowed: {canonical}")
         return canonical
+
+    def _is_allowed_domain(self, host: str) -> bool:
+        """Match the configured domain allowlist for every outbound target."""
+        for pattern in self._patterns:
+            suffix = pattern[1:]
+            if host.endswith(suffix) and host != suffix[1:]:
+                return True
+        for allowed in self._exact:
+            if host == allowed:
+                return True
+            if self.config.allow_subdomains and host.endswith("." + allowed):
+                return True
+        return False
 
     def is_allowed_origin(self, candidate: str, parent: str) -> bool:
         candidate_origin = origin(candidate)
@@ -232,7 +265,7 @@ class UrlPolicy:
         scope = credential_origin or (origin(parent_url) if parent_url else origin(url))
         same_origin = origin(url) == scope
         if not same_origin:
-            headers = {k: v for k, v in headers.items() if k.lower() not in SENSITIVE_HEADERS}
+            headers = {k: v for k, v in headers.items() if not is_sensitive_header(k)}
         if bearer_token and same_origin:
             headers["Authorization"] = f"Bearer {bearer_token}"
         return headers

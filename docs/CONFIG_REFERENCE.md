@@ -16,11 +16,11 @@ Project identifier.  Used as a prefix for all output filenames, the checkpoint d
 
 ## v3 request and discovery options
 
-`request_method` accepts `GET` or `POST`. For POST requests, `request_body` contains the payload and `request_body_type` selects `json` or `form` encoding. The same URL policy, credential scoping, retry, and rate-limit rules apply to both methods.
+`request_method` accepts `GET` or `POST`. For POST requests, `request_body` contains the payload and `request_body_type` selects `json` or `form` encoding. The same URL policy, credential scoping, retry, and rate-limit rules apply to both methods. Playwright navigation is GET-only; POST requests use the HTTP transport.
 
 `per_domain_rate_limit` adds an independent bounded token bucket per hostname on top of the global `rate_limit`. `proxy_failure_threshold` and `proxy_cooldown_seconds` control the run-scoped proxy circuit breaker.
 
-List mode may use `sitemap_urls` instead of, or in addition to, `start_urls`. Sitemap indexes and URL sets are traversed in document order and bounded by `sitemap_max_urls` and `sitemap_max_depth`.
+List mode may use `sitemap_urls` instead of, or in addition to, `start_urls`. Sitemap indexes and URL sets are traversed in document order and bounded by `sitemap_max_urls`, `sitemap_max_depth`, `sitemap_max_documents`, `sitemap_max_queue`, and `sitemap_max_bytes`.
 
 For pages with multiple independent list fields, set `record_field` to the primary record collection. Without it, Glider uses the largest list length rather than summing parallel columns.
 
@@ -169,7 +169,7 @@ Path to a JSON file containing session cookies as a flat key-value object:
 }
 ```
 
-Cookies are loaded at startup and injected into both `curl_cffi` sessions and Playwright browser contexts.
+Cookies are loaded at startup and injected into both `curl_cffi` sessions and Playwright browser contexts. Flat cookie maps are scoped to the configured base origin; structured entries must specify a matching URL/domain. Cookies are never sent cross-origin.
 
 ---
 
@@ -188,6 +188,21 @@ CSS selector that must be present on the page before content is captured.  Playw
 When `true`, visited URLs are persisted to a SQLite database (`data/<name>.db`) so that interrupted scrapes can be resumed automatically on the next run.
 
 > Recommended for any scrape involving more than ~100 pages.
+
+### `debug_snapshots` — object · Default: disabled
+
+Failed response bodies are not persisted unless explicitly enabled. When
+enabled, `max_files`, `max_bytes_per_file`, and `max_total_bytes` bound the
+debug directory. Snapshots may contain personal or authenticated content.
+
+```json
+"debug_snapshots": {
+  "enabled": true,
+  "max_files": 20,
+  "max_bytes_per_file": 500000,
+  "max_total_bytes": 10000000
+}
+```
 
 ---
 

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from engine.network import FetchResult
+from engine.redact import redact_text
 from engine.schemas import ScraperConfig
 
 
@@ -108,7 +109,10 @@ def build_final_report(
             "deduplicated": metrics_snapshot.get("duplicates_detected", 0),
         },
         "domains": metrics_snapshot.get("domains", {}),
-        "proxies": metrics_snapshot.get("proxies", {}),
+        "proxies": {
+            redact_text(str(proxy)): state
+            for proxy, state in metrics_snapshot.get("proxies", {}).items()
+        },
         "events": metrics_snapshot.get("events", {}),
         "latency_ms": metrics_snapshot.get("latency_ms", {}),
         "error_categories": _aggregate_categories(metrics_snapshot.get("domains", {})),

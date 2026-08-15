@@ -27,6 +27,8 @@ def main() -> int:
         raise SystemExit(f"version mismatch: pyproject={declared}, requested={version}")
 
     tag = f"v{version}"
+    if git("status", "--porcelain"):
+        raise SystemExit("working tree is not clean; refusing release verification")
     head = git("rev-parse", "HEAD")
     if git("cat-file", "-t", tag) != "tag":
         raise SystemExit(f"{tag} is not an annotated tag")

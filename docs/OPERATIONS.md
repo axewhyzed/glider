@@ -36,7 +36,7 @@ Every `scrape` creates an isolated run directory:
 ├── exports/
 │   ├── output.json      # extracted records as JSON array
 │   └── output.csv       # flattened CSV
-└── debug/               # bounded failed-page HTML snapshots
+└── debug/               # optional, bounded failed-page HTML snapshots
 ```
 
 `<output-dir>` defaults to `data/` and is controlled with `--output-dir`.
@@ -77,15 +77,20 @@ Configured via the `url_policy` block:
 | `allowed_schemes` | `["http", "https"]` | Only http/https |
 | `block_private_networks` | true | Reject localhost/private/loopback/link-local IPs |
 | `resolve_dns` | true | Pre-flight DNS: reject hostnames resolving to private IPs |
+| `dns_failure_policy` | `deny` | Allow or deny requests when DNS preflight fails |
 | `max_redirects` | 5 | Redirect hop cap |
 
-Defaults are deny-by-default: same-origin traversal only, private networks blocked, TLS verification on.
+Defaults are deny-by-default: same-origin traversal only, private networks
+blocked, DNS failures denied, TLS verification on, and configured domain
+allowlists apply to every outbound target. Browser service workers are blocked
+and Playwright navigation is GET-only.
 
 ## Credential scoping
 
 - Sensitive headers (`Authorization`, `Cookie`, `x-api-key`, etc.) are sent **only to their configured origin**; they are stripped on cross-origin requests.
 - Bearer tokens are injected only same-origin.
-- Browser cookies are scoped to `base_url`; domain-less cookies are refused.
+- Browser and HTTP cookies are scoped to the configured origin; domain-less
+  cookies are refused and structured entries cannot widen the scope.
 - The manifest stores a redacted copy of the config (digest still hashes the raw config).
 - `interaction_failure_policy=fail` makes a failed browser action a resumable page failure; `warn` keeps the compatibility behavior.
 - `robots_failure_policy=allow|deny` controls whether an unavailable or malformed robots file permits crawling. Robots origin state is bounded by `robots_max_origins`.
@@ -95,5 +100,9 @@ Defaults are deny-by-default: same-origin traversal only, private networks block
 - Every failed page is appended to `failures.jsonl` (url, category, message, timestamp) and kept in a bounded in-memory ring for the final report.
 - Failed items (`status='failed'`) are resumable on the next run.
 - A run with failures exits 4; `manifest.json` records `failed_count` and the report lists a capped preview of failed URLs.
-- Debug snapshots are bounded by `debug_snapshots` (`max_files`, `max_bytes_per_file`, `max_total_bytes`).
+- Debug snapshots are disabled by default. If enabled, they are bounded by
+  `debug_snapshots` (`max_files`, `max_bytes_per_file`, `max_total_bytes`) and
+  may contain authenticated response bodies.
+- A proxy circuit opens only for transport/time-out failures; ordinary HTTP
+  status responses do not falsely mark a healthy proxy as broken.
 - With `fail_parent_on_nested_error=true`, any required child failure keeps the parent resumable; with `false`, successful child data may be emitted with a partial-nested warning.

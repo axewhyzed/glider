@@ -70,6 +70,7 @@ async def test_snapshot_redacts_query_credentials(tmp_path):
         name="snap",
         base_url="https://example.com",
         fields=[],
+        debug_snapshots=DebugSnapshotConfig(enabled=True),
     )
     engine = ScraperEngine(config)
     engine.run_context = RunContext.create("snap", {"name": "snap"}, output_root=tmp_path)
@@ -106,7 +107,7 @@ async def test_snapshot_max_files_evicts_oldest(tmp_path):
         name="snap",
         base_url="https://example.com",
         fields=[],
-        debug_snapshots=DebugSnapshotConfig(max_files=3),
+        debug_snapshots=DebugSnapshotConfig(enabled=True, max_files=3),
     )
     engine = ScraperEngine(config)
     engine.run_context = RunContext.create("snap", {"name": "snap"}, output_root=tmp_path)
@@ -121,7 +122,7 @@ async def test_snapshot_truncated_to_max_bytes(tmp_path):
         name="snap",
         base_url="https://example.com",
         fields=[],
-        debug_snapshots=DebugSnapshotConfig(max_bytes_per_file=50),
+        debug_snapshots=DebugSnapshotConfig(enabled=True, max_bytes_per_file=50),
     )
     engine = ScraperEngine(config)
     engine.run_context = RunContext.create("snap", {"name": "snap"}, output_root=tmp_path)
@@ -137,6 +138,7 @@ async def test_snapshot_uses_run_debug_directory(tmp_path):
         name="snap",
         base_url="https://example.com",
         fields=[],
+        debug_snapshots=DebugSnapshotConfig(enabled=True),
     )
     engine = ScraperEngine(config)
     ctx = RunContext.create("snap", {"name": "snap"}, output_root=tmp_path)

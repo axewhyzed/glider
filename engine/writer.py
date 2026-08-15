@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -19,26 +20,32 @@ class JsonlStreamWriter:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._file: Optional[Any] = None
+        self._lock = asyncio.Lock()
 
     async def open(self) -> None:
+        async with self._lock:
+            await self._open_unlocked()
+
+    async def _open_unlocked(self) -> None:
         if self._file is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._file = await aiofiles.open(self.path, mode="a", encoding="utf-8")
 
     async def write(self, data: Dict[str, Any]) -> None:
-        if self._file is None:
-            await self.open()
-        # Serialize to one complete line before writing so a cancellation can
-        # never leave a partial record on disk.
-        line = json.dumps(data, ensure_ascii=False, default=str) + "\n"
-        assert self._file is not None
-        await self._file.write(line)
-        await self._file.flush()
+        async with self._lock:
+            await self._open_unlocked()
+            # Serialize to one complete line before writing so a cancellation
+            # can never leave a partial record on disk.
+            line = json.dumps(data, ensure_ascii=False, default=str) + "\n"
+            assert self._file is not None
+            await self._file.write(line)
+            await self._file.flush()
 
     async def close(self) -> None:
-        if self._file is not None:
-            await self._file.close()
-            self._file = None
+        async with self._lock:
+            if self._file is not None:
+                await self._file.close()
+                self._file = None
 
     async def __aenter__(self) -> "JsonlStreamWriter":
         await self.open()

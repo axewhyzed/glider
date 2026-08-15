@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -21,6 +22,9 @@ def _slugify(value: str) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,7 @@ class RunContext:
     export_directory: Path
     debug_directory: Path
     failures_path: Path
+    _failure_lock: Any = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
 
     @classmethod
     def create(
@@ -49,10 +54,18 @@ class RunContext:
         run_id: Optional[str] = None,
         resume: bool = False,
     ) -> "RunContext":
-        root = Path(output_root)
+        root = Path(output_root).resolve()
         slug = _slugify(config_name)
         run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
-        directory = root / slug / "runs" / run_id
+        if not _RUN_ID_RE.fullmatch(run_id):
+            raise ValueError(
+                "run_id must contain only letters, numbers, '.', '_' or '-' and be at most 128 characters"
+            )
+        directory = (root / slug / "runs" / run_id).resolve()
+        try:
+            directory.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("run_id resolves outside output_root") from exc
         digest_payload = json.dumps(config_data, sort_keys=True, default=str).encode("utf-8")
         digest = hashlib.sha256(digest_payload).hexdigest()
 
@@ -122,7 +135,8 @@ class RunContext:
         """Append one JSON line to failures.jsonl (crash-safe, flushed)."""
         import aiofiles
 
-        self.failures_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(self.failures_path, mode="a", encoding="utf-8") as f:
-            await f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-            await f.flush()
+        async with self._failure_lock:
+            self.failures_path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(self.failures_path, mode="a", encoding="utf-8") as f:
+                await f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+                await f.flush()

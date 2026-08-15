@@ -49,13 +49,25 @@ def redact_dict(data: Dict[str, Any], keys: Set[str] = SECRET_KEYS) -> Dict[str,
     """Deep-copy redaction for config dicts, headers, and manifest echoes."""
     result: Dict[str, Any] = {}
     for key, value in data.items():
-        if str(key).lower() in keys:
+        key_name = str(key).lower()
+        if key_name in keys or any(
+            marker in key_name
+            for marker in ("authorization", "credential", "password", "secret", "token", "api-key")
+        ):
             result[key] = REDACTED
+        elif key_name == "headers" and isinstance(value, dict):
+            # Header names are user-configurable. Persisting all values as
+            # redacted avoids leaking credentials carried by custom names.
+            result[key] = {header: REDACTED for header in value}
         elif isinstance(value, dict):
             result[key] = redact_dict(value, keys)
         elif isinstance(value, list):
             result[key] = [
-                redact_dict(item, keys) if isinstance(item, dict) else item
+                redact_dict(item, keys)
+                if isinstance(item, dict)
+                else redact_text(item)
+                if isinstance(item, str)
+                else item
                 for item in value
             ]
         else:

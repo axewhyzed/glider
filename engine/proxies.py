@@ -74,6 +74,13 @@ class ProxyLease:
             self._resolved = True
             await self._breaker._resolve(self.proxy, self._generation, success=False)
 
+    async def abandon(self) -> None:
+        """Release a reservation that was never used, without an outcome."""
+
+        if not self._resolved:
+            self._resolved = True
+            await self._breaker._release(self.proxy, self._generation)
+
     async def __aenter__(self) -> "ProxyLease":
         return self
 
@@ -174,6 +181,16 @@ class ProxyCircuitBreaker:
                 record.consecutive_failures >= self.policy.failure_threshold
             ):
                 self._open(record, record.last_used_at)
+
+    async def _release(self, proxy: str, generation: int) -> None:
+        """Release an unused lease without changing circuit state."""
+
+        async with self._lock:
+            record = self._records.get(proxy)
+            if record is None:
+                return
+            record.active_leases = max(0, record.active_leases - 1)
+            record.last_used_at = self._clock()
 
     def _get_or_create_record(self, proxy: str, now: float) -> _ProxyRecord:
         record = self._records.get(proxy)

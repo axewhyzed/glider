@@ -2,6 +2,33 @@
 
 ---
 
+## v3.0.2 to v3.1.0 (August 2026)
+
+### Security-default changes
+
+* DNS preflight failures are denied by default. Set
+  `url_policy.dns_failure_policy` to `allow` only in a controlled environment.
+* `debug_snapshots.enabled` now defaults to `false`; enable it deliberately
+  when failed response bodies are safe to persist.
+* `allowed_domains` applies to roots, sitemap documents, redirects, and OAuth
+  token URLs as well as nested targets.
+* Cookies and sensitive custom headers are scoped to their origin.
+
+### Compatibility changes
+
+* Playwright navigation supports GET only. Configurations using
+  `use_playwright: true` with `request_method: "POST"` must use HTTP or change
+  the method to GET.
+* Browser service workers are blocked so browser requests remain subject to
+  Glider's network policy.
+
+### New bounded controls
+
+Sitemap crawls now accept `sitemap_max_documents`, `sitemap_max_queue`, and
+`sitemap_max_bytes` in addition to the existing URL and depth limits.
+
+---
+
 ## v2.7 → v2.8 (April 2026)
 
 ### Breaking Changes

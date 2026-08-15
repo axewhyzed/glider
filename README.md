@@ -44,7 +44,7 @@ Built on **Python 3.10+**, it leverages **AsyncIO**, **Playwright**, and **curl_
 * **Crash-Proof Streaming Writes:** Data streamed line-by-line to a run-scoped `stream.jsonl` before final export. Partial artifacts remain available after interruption.
 * **Micro-Batching:** Pending records flushed every 10 items; remaining records flushed on shutdown.
 * **Ethical Compliance:** Built-in `robots.txt` parser respects site policies when enabled.
-* **Debug Snapshots:** Failed pages auto-saved to `debug/` as HTML for post-mortem inspection.
+* **Debug Snapshots:** Optional, bounded failed-page HTML snapshots for post-mortem inspection (explicit opt-in).
 * **Rotating Logs:** `loguru`-powered structured logs with 5 MB rotation and 7-day retention.
 
 ### ⚡ Performance
@@ -105,9 +105,16 @@ playwright install chromium
 
 - Same-origin traversal by default; cross-origin links require `url_policy.allow_external_urls`.
 - Private/local network targets are blocked (`url_policy.block_private_networks`, `resolve_dns`).
+- DNS preflight failures are denied by default (`url_policy.dns_failure_policy=deny`).
 - TLS verification is on; `browser.ignore_https_errors` is `false` by default.
 - Sensitive headers and cookies are scoped to their origin and stripped cross-origin.
+- Failed-page debug snapshots are disabled by default because response bodies may contain secrets.
 - The run manifest stores a redacted copy of the config.
+
+Read [SECURITY.md](SECURITY.md) for vulnerability reporting and deployment
+guidance, [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow,
+and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the security boundaries
+and residual risks.
 
 ---
 

@@ -127,8 +127,6 @@ class CheckpointManager:
     async def mark_done(self, url: str, kind: str = "generic"):
         if not self.enabled or not self._db_conn:
             return
-        self._cache.add((url, kind))
-        self._done_urls.add(url)
         try:
             await self._db_conn.execute(
                 """
@@ -141,6 +139,11 @@ class CheckpointManager:
                 (url, kind),
             )
             await self._db_conn.commit()
+            # Do not claim completion in memory until the durable transition
+            # has committed; otherwise a transient SQLite failure can cause
+            # the current process to skip work that was never persisted.
+            self._cache.add((url, kind))
+            self._done_urls.add(url)
         except Exception as exc:
             logger.warning(f"Checkpoint Error: {exc}")
 

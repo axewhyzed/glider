@@ -37,7 +37,7 @@ class InteractionType(str, Enum):
 
 class Transformer(BaseModel):
     name: TransformerType
-    args: Optional[List[Any]] = []
+    args: Optional[List[Any]] = Field(default_factory=list)
     
     @model_validator(mode='before')
     @classmethod
@@ -61,15 +61,28 @@ class Interaction(BaseModel):
     type: InteractionType
     selector: Optional[str] = None
     value: Optional[str] = None
-    duration: Optional[int] = None
+    duration: Optional[int] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_action_requirements(self) -> "Interaction":
+        if self.type in {
+            InteractionType.CLICK,
+            InteractionType.FILL,
+            InteractionType.PRESS,
+            InteractionType.HOVER,
+        } and not self.selector:
+            raise ValueError(f"{self.type.value} interaction requires a selector")
+        if self.type == InteractionType.KEY_PRESS and not self.value:
+            raise ValueError("key interaction requires a value")
+        return self
 
 class DataField(BaseModel):
     name: str
     selector: Optional[Any] = Field(default=None, exclude=True) 
-    selectors: List[Selector] = Field(default=[])
+    selectors: List[Selector] = Field(default_factory=list)
     is_list: bool = False
     attribute: Optional[str] = None
-    transformers: List[Transformer] = []
+    transformers: List[Transformer] = Field(default_factory=list)
     children: Optional[List['DataField']] = None
     
     # Nested Scraping Logic
@@ -125,6 +138,7 @@ class UrlPolicyConfig(BaseModel):
     allowed_schemes: List[str] = Field(default_factory=lambda: ["http", "https"])
     block_private_networks: bool = True
     resolve_dns: bool = True
+    dns_failure_policy: Literal["allow", "deny"] = "deny"
     max_redirects: int = Field(default=5, ge=0, le=20)
 
     @field_validator("allowed_schemes")
@@ -206,7 +220,9 @@ class ExtractionValidation(BaseModel):
 class DebugSnapshotConfig(BaseModel):
     """Bounded debug snapshot policy (P7.5)."""
 
-    enabled: bool = True
+    # Failed bodies can contain credentials or personal data.  Operators must
+    # explicitly opt in before persisting them to disk.
+    enabled: bool = False
     max_files: int = Field(default=100, ge=0)
     max_bytes_per_file: int = Field(default=1_000_000, ge=0)
     max_total_bytes: int = Field(default=100_000_000, ge=0)
@@ -256,6 +272,9 @@ class ScraperConfig(BaseModel):
     sitemap_urls: List[HttpUrl] = Field(default_factory=list)
     sitemap_max_urls: int = Field(default=10000, ge=1, le=1_000_000)
     sitemap_max_depth: int = Field(default=3, ge=0, le=20)
+    sitemap_max_documents: int = Field(default=10000, ge=1, le=1_000_000)
+    sitemap_max_queue: int = Field(default=10000, ge=1, le=1_000_000)
+    sitemap_max_bytes: int = Field(default=10_000_000, ge=1024, le=100_000_000)
     per_domain_rate_limit: Optional[int] = Field(default=None, ge=1, le=100000)
     proxy_failure_threshold: int = Field(default=3, ge=1, le=100)
     proxy_cooldown_seconds: float = Field(default=60.0, ge=0, le=86400)
@@ -315,6 +334,14 @@ class ScraperConfig(BaseModel):
                 validate_nested_fields(field.nested_fields or [])
 
         validate_nested_fields(self.fields)
+        return self
+
+    @model_validator(mode="after")
+    def check_browser_method(self) -> "ScraperConfig":
+        if self.use_playwright and self.request_method != "GET":
+            raise ValueError(
+                "use_playwright supports only GET requests; use_playwright=false for POST requests"
+            )
         return self
 
 DataField.model_rebuild()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, cast
 from urllib.parse import urlsplit
@@ -18,7 +17,8 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from fake_useragent import UserAgent
 
 from engine.schemas import ScraperConfig, InteractionType
-from engine.network import FetchResult, SENSITIVE_HEADERS, UrlPolicy, origin
+from engine.network import FetchResult, UrlPolicy, is_sensitive_header, origin
+from engine.cookies import load_scoped_cookies
 
 # Optional stealth — support both old module-style and new direct-function-style imports
 stealth_async: Optional[Callable[[Any], Awaitable[None]]] = None
@@ -79,6 +79,35 @@ class BrowserManager:
         """
         if self.config.browser.proxy_rotation == "per_context":
             self._rotation_requested = True
+
+    async def ensure_context_proxy(self, proxy: Optional[str]) -> Optional[str]:
+        """Bind the next shared context to ``proxy`` and return actual identity.
+
+        Proxy selection and context rotation are separate layers, so concurrent
+        callers may select different candidates while one caller is rotating.
+        This method serializes the binding and lets callers reconcile their
+        health lease with the proxy that is actually attached.
+        """
+        if self.config.browser.proxy_rotation == "per_request":
+            return proxy
+        async with self._context_condition:
+            while self._active_requests > 0 and (
+                self._rotation_requested
+                or self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
+                or proxy != self._context_proxy
+            ):
+                await self._context_condition.wait()
+            if self._rotation_requested or proxy != self._context_proxy or (
+                self._active_requests == 0
+                and self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
+            ):
+                replacement_proxy = (
+                    proxy
+                    if self._rotation_requested
+                    else proxy or self._context_proxy
+                )
+                await self._create_context(replacement_proxy)
+            return self._context_proxy
     
     async def start(self, proxy: Optional[str] = None):
         if self.playwright: return
@@ -102,6 +131,9 @@ class BrowserManager:
             "user_agent": self.ua_rotator.random,
             "viewport": {"width": 1920, "height": 1080},
             "ignore_https_errors": self.config.browser.ignore_https_errors,
+            # Routes do not intercept service-worker handled requests. Keep
+            # the URL/SSRF policy authoritative for every browser request.
+            "service_workers": "block",
         }
         if proxy:
             options["proxy"] = {"server": proxy}
@@ -114,7 +146,13 @@ class BrowserManager:
         async def _guard(route) -> None:
             request_url = route.request.url
             host = urlsplit(request_url).hostname or ""
-            if host and (_host_is_private(host) or _host_resolves_to_private(host)):
+            resolved_private = _host_resolves_to_private(host) if host else False
+            dns_failed = resolved_private is None
+            if host and (
+                _host_is_private(host)
+                or resolved_private is True
+                or (dns_failed and self.config.url_policy.dns_failure_policy == "deny")
+            ):
                 await route.abort()
                 logger.warning(f"SSRF guard aborted {request_url}")
             else:
@@ -122,63 +160,50 @@ class BrowserManager:
 
         await context.route("**/*", _guard)
 
-    async def _create_context(self, proxy: Optional[str] = None):
-        if self.context:
+    def _cookie_scope_url(self) -> Optional[str]:
+        return (
+            str(self.config.base_url)
+            if self.config.base_url
+            else (str(self.config.start_urls[0]) if self.config.start_urls else None)
+        )
+
+    async def _new_context(self, proxy: Optional[str] = None):
+        """Create and fully secure a context, closing it if setup fails."""
+        if not self.browser:
+            raise RuntimeError("Browser not initialized")
+
+        context = await self.browser.new_context(**self._build_context_options(proxy))
+        try:
+            # Shared and per-request contexts must receive identical,
+            # origin-scoped cookie injection. Do not silently continue without
+            # cookies when setup fails; that changes authenticated semantics.
+            if self.config.cookies_file:
+                scoped = load_scoped_cookies(self.config.cookies_file, self._cookie_scope_url())
+                if scoped.playwright:
+                    # Playwright's stubs type this as a structural sequence;
+                    # the loader returns validated cookie dictionaries that
+                    # match the runtime API.
+                    await context.add_cookies(cast(Any, scoped.playwright))
+                    logger.info(f"🍪 Injected {len(scoped.playwright)} cookies into Playwright context")
+            await self._install_request_guard(context)
+        except BaseException:
             try:
-                await self.context.close()
+                await context.close()
+            except Exception as close_exc:
+                logger.warning(f"Failed to close temporary browser context: {close_exc}")
+            raise
+        return context
+
+    async def _create_context(self, proxy: Optional[str] = None):
+        """Atomically replace the shared context after setup succeeds."""
+        new_context = await self._new_context(proxy)
+        old_context = self.context
+        self.context = new_context
+        if old_context:
+            try:
+                await old_context.close()
             except Exception as e:
                 logger.warning(f"Failed to close old context: {e}")
-        
-        if not self.browser:
-             raise RuntimeError("Browser not initialized")
-
-        context_options = self._build_context_options(proxy)
-
-        # Inject cookies from cookie file into the Playwright context.
-        # Cookies are always scoped to the configured base_url origin; domain-less
-        # cookies are refused to prevent leakage to other origins.
-        if self.config.cookies_file:
-            try:
-                with open(self.config.cookies_file, 'r') as f:
-                    raw_cookies = json.load(f)
-                base_url_str = str(self.config.base_url) if self.config.base_url else None
-                pw_cookies = []
-                if isinstance(raw_cookies, dict):
-                    if base_url_str is None:
-                        logger.error("❌ cookies_file requires base_url to scope cookies")
-                    else:
-                        for k, v in raw_cookies.items():
-                            if v is None or not isinstance(v, (str, int, float, bool)):
-                                continue
-                            pw_cookies.append({"name": str(k), "value": str(v), "url": base_url_str})
-                elif isinstance(raw_cookies, list):
-                    # Already in Playwright format; require every entry to carry
-                    # url or domain so nothing is left to first-navigation inference.
-                    if base_url_str is not None:
-                        for entry in raw_cookies:
-                            if "url" not in entry and "domain" not in entry:
-                                entry = dict(entry)
-                                entry["url"] = base_url_str
-                            pw_cookies.append(entry)
-                    else:
-                        logger.error("❌ cookies_file requires base_url to scope cookies")
-                else:
-                    pw_cookies = []
-
-                context = await self.browser.new_context(**context_options)
-                self.context = context
-                if pw_cookies:
-                    await context.add_cookies(pw_cookies)
-                    logger.info(f"🍪 Injected {len(pw_cookies)} cookies into Playwright context")
-            except Exception as e:
-                logger.error(f"❌ Failed to inject cookies into browser context: {e}")
-                self.context = await self.browser.new_context(**context_options)
-        else:
-            self.context = await self.browser.new_context(**context_options)
-
-        if self.context is None:
-            raise RuntimeError("Browser context was not created")
-        await self._install_request_guard(self.context)
         self.request_count = 0
         self._context_proxy = proxy
         self._rotation_requested = False
@@ -203,6 +228,7 @@ class BrowserManager:
 
     async def fetch_page_legacy(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
         """Fetch a page content handling context rotation and interactions."""
+        url = self._validate_navigation_url(url)
         if not self.context:
             raise RuntimeError("Browser context not started")
 
@@ -263,9 +289,22 @@ class BrowserManager:
         (default) uses the shared context and rotates when the request cap is
         reached.
         """
+        url = self._validate_navigation_url(url)
+        if method.upper() != "GET":
+            raise ValueError(
+                "BrowserManager supports only GET navigation; use the HTTP transport for POST requests"
+            )
+        method = "GET"
         if self.config.browser.proxy_rotation == "per_request":
             return await self._fetch_page_single_context(url, headers, proxy, method, body, body_type)
         return await self._fetch_page_shared_context(url, headers, proxy, method, body, body_type)
+
+    def _validate_navigation_url(self, url: str) -> str:
+        """Validate direct browser entry points before creating a page."""
+        validated = self.url_policy.validate(url)
+        if urlsplit(validated).scheme not in {"http", "https"}:
+            raise ValueError("Browser navigation only supports http and https URLs")
+        return validated
 
     async def _fetch_page_single_context(
         self,
@@ -279,9 +318,8 @@ class BrowserManager:
         """per_request mode: one throwaway context per fetch."""
         if not self.browser:
             raise RuntimeError("Browser not started")
-        context = await self.browser.new_context(**self._build_context_options(proxy))
+        context = await self._new_context(proxy)
         try:
-            await self._install_request_guard(context)
             return await self._fetch_with_context(context, url, headers, method, body, body_type)
         finally:
             try:
@@ -308,9 +346,13 @@ class BrowserManager:
             # A circuit-open proxy requests rotation.  Wait for any requests
             # already using the old context, then swap before admitting this
             # request so it cannot intentionally reuse the unhealthy proxy.
-            while self._rotation_requested and self._active_requests > 0:
+            while self._active_requests > 0 and (
+                self._rotation_requested
+                or self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
+                or proxy != self._context_proxy
+            ):
                 await self._context_condition.wait()
-            if self._rotation_requested or (
+            if self._rotation_requested or proxy != self._context_proxy or (
                 self._active_requests == 0
                 and self.request_count >= self.MAX_REQUESTS_PER_CONTEXT
             ):
@@ -326,13 +368,16 @@ class BrowserManager:
                 await self._create_context(proxy=replacement_proxy)
             context = self.context
             self._active_requests += 1
+            # Reserve the context slot at admission, not after navigation.
+            # This prevents concurrent callers from exceeding the configured
+            # per-context request cap.
+            self.request_count += 1
 
         try:
             return await self._fetch_with_context(context, url, headers, method, body, body_type)
         finally:
             async with self._context_condition:
                 self._active_requests -= 1
-                self.request_count += 1
                 self._context_condition.notify_all()
 
     async def _fetch_with_context(
@@ -349,14 +394,15 @@ class BrowserManager:
         started = time.perf_counter()
         response = None
         try:
-            parsed_root = urlsplit(url)
-            request_origin = origin(url) if parsed_root.scheme in {"http", "https"} else "opaque"
+            request_origin = origin(url)
 
             async def _page_policy(route) -> None:
                 request = route.request
                 request_url = request.url
-                if urlsplit(request_url).scheme not in {"http", "https"}:
-                    await route.continue_()
+                request_scheme = urlsplit(request_url).scheme.lower()
+                if request_scheme not in {"http", "https"}:
+                    await route.abort()
+                    logger.warning(f"Browser blocked non-network request ({request_url})")
                     return
                 previous = request.redirected_from
                 redirect_hops = 0
@@ -378,7 +424,7 @@ class BrowserManager:
                 if origin(request_url) != request_origin:
                     filtered = {
                         key: value for key, value in filtered.items()
-                        if key.lower() not in SENSITIVE_HEADERS
+                        if not is_sensitive_header(key)
                     }
                 await route.continue_(headers=filtered)
 
@@ -392,17 +438,14 @@ class BrowserManager:
                 await stealth_async(page)
 
             nav_timeout_ms = self.config.request_timeout * 1000
+            if method.upper() != "GET":
+                raise ValueError(
+                    "BrowserManager supports only GET navigation; use the HTTP transport for POST requests"
+                )
             goto_options: Dict[str, Any] = {
                 "timeout": nav_timeout_ms,
                 "wait_until": "domcontentloaded",
             }
-            if method != "GET":
-                goto_options["method"] = method
-                if body is not None:
-                    goto_options["post_data"] = (
-                        json.dumps(body) if body_type == "json" and not isinstance(body, str)
-                        else str(body)
-                    )
             response = await page.goto(url, **goto_options)
             if self.config.interactions:
                 await self._handle_interactions(page)

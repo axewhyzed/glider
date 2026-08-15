@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable, List, Set
+from collections import deque
+from typing import Awaitable, Callable, Deque, List, Set
 from urllib.parse import urljoin
 from xml.etree import ElementTree
 
@@ -35,28 +36,49 @@ async def discover_sitemap(
     *,
     max_urls: int = 10000,
     max_depth: int = 3,
+    max_documents: int = 10000,
+    max_queue: int = 10000,
+    max_bytes: int = 10_000_000,
 ) -> List[str]:
     """Walk sitemap indexes with deterministic order and bounded recursion."""
     discovered: List[str] = []
+    discovered_set: Set[str] = set()
     seen: Set[str] = set()
-    queue: List[tuple[str, int]] = [(url, 0) for url in roots]
-    while queue and len(discovered) < max_urls:
-        sitemap_url, depth = queue.pop(0)
+    scheduled: Set[str] = set()
+    queue: Deque[tuple[str, int]] = deque()
+    for url in roots:
+        if url not in scheduled and len(queue) < max_queue:
+            scheduled.add(url)
+            queue.append((url, 0))
+
+    documents = 0
+    while queue and len(discovered) < max_urls and documents < max_documents:
+        sitemap_url, depth = queue.popleft()
         if sitemap_url in seen or depth > max_depth:
             continue
         seen.add(sitemap_url)
+        documents += 1
         if not await is_allowed(sitemap_url):
             continue
         content = await fetch(sitemap_url)
+        if len(content.encode("utf-8")) > max_bytes:
+            continue
         try:
             urls, children = parse_sitemap(content, sitemap_url)
         except ElementTree.ParseError:
             continue
         for url in urls:
-            if url not in discovered and await is_allowed(url):
+            if url not in discovered_set and await is_allowed(url):
+                discovered_set.add(url)
                 discovered.append(url)
                 if len(discovered) >= max_urls:
                     break
         if depth < max_depth:
-            queue.extend((child, depth + 1) for child in children if child not in seen)
+            for child in children:
+                if child in seen or child in scheduled:
+                    continue
+                if len(queue) >= max_queue:
+                    break
+                scheduled.add(child)
+                queue.append((child, depth + 1))
     return discovered

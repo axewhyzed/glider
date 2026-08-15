@@ -1,6 +1,6 @@
 # Known Issues & Limitations
 
-This document lists intentional limitations in Glider v3.0.2. Resolved v3 transport, checkpoint, security, and export bugs are not listed here.
+This document lists intentional limitations in Glider v3.1.0. Resolved v3 transport, checkpoint, security, and export bugs are not listed here.
 
 ## Design limitations
 
@@ -41,5 +41,8 @@ Single-request GET/POST API scraping is supported. Chained API workflows requiri
 - Raw browser navigation-response capture for JSON APIs.
 - Origin-scoped sensitive headers and per-request browser SSRF interception.
 - Durable exact deduplication for resumed runs.
+- Fail-closed DNS preflight, origin-scoped cookies/credentials, and blocked
+  browser service workers.
+- Bounded sitemap discovery and cancellation-safe streaming/checkpoint writes.
 
 Other intentionally unimplemented extensions include Parquet/SQLite output, CAPTCHA-solving services, and CSV list expansion.

@@ -1,5 +1,38 @@
 # Changelog
 
+## v3.1.0 - Deep reliability and security hardening (August 2026)
+
+### Security
+
+* DNS preflight failures are denied unless `url_policy.dns_failure_policy` is
+  explicitly set to `allow`.
+* `allowed_domains` applies to roots, redirects, pagination, nested URLs,
+  sitemaps, and OAuth token endpoints.
+* Cookies and sensitive/custom credential headers are origin-scoped; persisted
+  artifacts redact cookie values, proxy credentials, and secret-like fields.
+* Browser service workers and unsafe schemes are blocked, and failed-page
+  snapshots are opt-in (`debug_snapshots.enabled=false` by default).
+
+### Reliability
+
+* Streaming writes, checkpoint acknowledgements, failure logs, and concurrent
+  deduplication are cancellation-safe and durable before completion is marked.
+* Browser proxy leases match the proxy bound to the Playwright context, context
+  request caps hold under concurrency, and only transport failures open proxy
+  circuits.
+* Run cleanup preserves resumable `failed`, `partial`, and `cancelled` states.
+* Sitemap discovery and nested-child caches are bounded; pagination redirects
+  and extraction validation are handled consistently.
+* Playwright POST navigation is rejected explicitly; use HTTP transport for
+  POST requests.
+
+### Verification
+
+* Core suite: 309 passed, 1 deselected.
+* Added regression coverage for URL policy, cookie scoping, proxy leases,
+  writer concurrency, cancellation, deduplication, sitemap bounds, and
+  transport security.
+
 ## v3.0.2 - Safe browser proxy rotation (August 2026)
 
 ### Fixes

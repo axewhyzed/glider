@@ -45,9 +45,9 @@ def main() -> int:
 
     remote_head = git("ls-remote", args.remote, "refs/heads/main").split()[0]
     remote_tag = git("ls-remote", args.remote, f"refs/tags/{tag}^{{}}").split()[0]
-    if remote_head != head or remote_tag != head:
+    if remote_head != head or remote_tag != tag_target:
         raise SystemExit(
-            f"remote mismatch: main={remote_head}, tag={remote_tag}, expected={head}"
+            f"remote mismatch: main={remote_head}, tag={remote_tag}, expected main={head}, tag={tag_target}"
         )
     print(f"release verified: {tag} -> {tag_target}; main -> {head}")
     return 0

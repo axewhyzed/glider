@@ -18,19 +18,20 @@
 ## Release
 
 - [x] Version is `3.3.1` in `pyproject.toml`.
-- [ ] Commit the reviewed implementation as the v3.3.1 release commit.
-- [ ] Create annotated tag: `git tag -a v3.3.1 -m "Glider v3.3.1"`.
-- [ ] Push release commit and tag: `git push origin main --follow-tags`.
+- [x] Commit the reviewed implementation as the v3.3.1 release commit.
+- [x] Create annotated tag: `git tag -a v3.3.1 -m "Glider v3.3.1"`.
+- [x] Push release commit and tag: `git push origin main --follow-tags`.
 
 ### Release references
 
-- Release implementation commit: to be recorded after commit.
-- Annotated tag `v3.3.1` must point to the release implementation commit.
-- Any post-release documentation commit must be recorded separately; the tag
+- Release implementation commit: `f24cd1e0b2c1ce0cf396dfd36092f252466aca47`.
+- Annotated tag `v3.3.1` points to the release implementation commit.
+- Post-release documentation commit is recorded separately; the tag
   intentionally remains on the implementation commit.
 
 ## Post-release
 
-- [ ] Run `venv\Scripts\python.exe verify_release.py --version 3.3.1`.
-- [ ] Verify GitHub shows tag `v3.3.1` and the release commit.
-- [ ] Record the final remote commit and tag hashes here.
+- [x] Run `venv\Scripts\python.exe verify_release.py --version 3.3.1`.
+- [x] Verify GitHub shows tag `v3.3.1` and the release commit.
+- [x] Remote tag `v3.3.1` resolves to
+  `f24cd1e0b2c1ce0cf396dfd36092f252466aca47`.

@@ -81,4 +81,8 @@ continues to identify the reviewed implementation.
 - [x] Use `workload_size` as the documented benchmark input while preserving
   `pages` compatibility aliases and output.
 - [x] Add regression coverage for canonical and legacy benchmark APIs.
-- [ ] Complete release verification, tag `v3.3.1`, and push the patch.
+- [x] Complete release verification, tag `v3.3.1`, and push the patch.
+
+Release implementation commit: `f24cd1e0b2c1ce0cf396dfd36092f252466aca47`.
+Post-release checklist documentation is kept in a separate commit so the tag
+continues to identify the reviewed implementation.

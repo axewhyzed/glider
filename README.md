@@ -120,7 +120,8 @@ and residual risks.
 
 ## 🚀 Quick Start
 
-Glider is controlled entirely by JSON configuration files. Several ready-to-run examples are in the `configs/` folder.
+Glider is controlled entirely by JSON configuration files. Ready-to-edit
+templates are in `examples/`; public-target configurations are in `configs/`.
 
 ### Install
 
@@ -481,7 +482,11 @@ Config values may reference environment variables using `${VAR_NAME}` or `$VAR_N
 
 Each child record automatically gets `_source_url` (the child page URL) and `_parent_url` (the page that linked to it).
 
-See [`docs/EXAMPLES.md`](docs/EXAMPLES.md) for more complete recipes and [`docs/ATTRIBUTE_EXTRACTION.md`](docs/ATTRIBUTE_EXTRACTION.md) for attribute extraction patterns.
+See [`examples/README.md`](examples/README.md) for the quick-start templates,
+[`docs/EXAMPLES.md`](docs/EXAMPLES.md) for complete recipes,
+[`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for deterministic usage validation,
+and [`docs/ATTRIBUTE_EXTRACTION.md`](docs/ATTRIBUTE_EXTRACTION.md) for
+attribute extraction patterns.
 
 ---
 
@@ -489,6 +494,7 @@ See [`docs/EXAMPLES.md`](docs/EXAMPLES.md) for more complete recipes and [`docs/
 
 ```text
 glider/
+├── examples/                   # Safe-to-edit configuration templates
 ├── configs/                    # JSON configuration files (recipes)
 │   ├── books_example.json      # Static HTML pagination example
 │   ├── quotes_js.json          # Playwright JS-rendered example
@@ -501,6 +507,7 @@ glider/
 ├── docs/                       # Extended documentation
 │   ├── ATTRIBUTE_EXTRACTION.md
 │   ├── CONFIG_REFERENCE.md
+│   ├── BENCHMARKS.md
 │   ├── EXAMPLES.md
 │   ├── KNOWN_ISSUES.md
 │   └── TRANSFORMERS.md
@@ -514,7 +521,8 @@ glider/
 │   └── utils.py                # Transformer pipeline, config loader
 ├── logs/                       # Rotating execution logs (auto-created)
 ├── debug/                      # HTML snapshots of failed pages (auto-created)
-├── tests/                      # Pytest unit tests (36 tests)
+├── benchmarks/                 # Deterministic local usage benchmarks
+├── tests/                      # Pytest unit and integration tests
 ├── main.py                     # CLI entry point & live dashboard
 ├── CHANGELOG.md                # Detailed version history
 ├── UPGRADE_GUIDE.md            # Migration guides (v2.5 → v2.6, v2.7 → v2.8)
@@ -525,6 +533,14 @@ glider/
 ---
 
 ## 🆕 What's New
+
+### v3.2.0 — Usage and developer workflow
+
+* Deterministic local HTTP validation for HTML pagination, JSON APIs, nested
+  links, and list-mode concurrency.
+* Repeatable benchmark command: `python -m benchmarks.local`.
+* Checked-in templates in `examples/` for list, API POST, and nested-page
+  scrapers.
 
 ### v2.9.0 — Production Readiness (August 2026)
 
@@ -597,7 +613,10 @@ venv\Scripts\python.exe -m pytest tests -q
 venv\Scripts\python.exe -m pytest tests -m browser
 ```
 
-The suite covers config schema validation, transformers, resolvers, network policy/SSRF, checkpoint resume, run isolation, recursion/cycles, dedup, output writer, metrics, redaction, CLI exit codes, and operational cancellation/flush.
+The suite covers config schema validation, checked-in examples, deterministic
+local HTTP pagination/extraction, transformers, resolvers, network policy/SSRF,
+checkpoint resume, run isolation, recursion/cycles, dedup, output writer,
+metrics, redaction, CLI exit codes, and operational cancellation/flush.
 
 ### Adding Tests
 

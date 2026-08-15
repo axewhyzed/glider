@@ -2,6 +2,20 @@
 
 ---
 
+## v3.1.0 to v3.2.0 (August 2026)
+
+This release is backward-compatible for scraper configurations and focuses on
+usage validation and developer workflow.
+
+* Run `python -m benchmarks.local` to measure local HTTP extraction without
+  relying on an external site.
+* Start new configurations from `examples/quickstart_list.json`,
+  `examples/api_post.json`, or `examples/nested_links.json`.
+* Run `pytest tests -q` to include deterministic local HTTP integration tests;
+  no external network access is required.
+
+---
+
 ## v3.0.2 to v3.1.0 (August 2026)
 
 ### Security-default changes

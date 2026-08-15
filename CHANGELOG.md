@@ -1,5 +1,37 @@
 # Changelog
 
+## v3.2.0 - Usage, benchmarks, and developer ergonomics (August 2026)
+
+### Usage validation
+
+* Added deterministic local HTTP fixtures covering HTML pagination, JSON API
+  extraction, nested links, and concurrent list processing through the real
+  curl transport.
+* Added checked-in, schema-validated templates for list extraction, API POST,
+  and nested product pages.
+
+### Benchmarks
+
+* Added `python -m benchmarks.local`, a repeatable local benchmark that reports
+  elapsed time, records, failures, batches, and requests per second.
+* Documented a concurrency comparison matrix and how to record comparable
+  measurements without relying on public-site availability.
+
+### Developer experience
+
+* Added an examples guide with safe configuration and credential-handling
+  guidance.
+* Included the benchmark helpers in the package so they are available from an
+  editable or built installation.
+
+### Verification
+
+* Core suite: 313 passed, 1 deselected.
+* Production code and benchmark package: Pyright clean.
+* Local benchmark baseline on this Windows/Python 3.11 environment: 100 pages,
+  concurrency 10, three runs, approximately 49.9–52.0 requests/second with
+  zero failures. These numbers are environment-specific, not a promise.
+
 ## v3.1.0 - Deep reliability and security hardening (August 2026)
 
 ### Security

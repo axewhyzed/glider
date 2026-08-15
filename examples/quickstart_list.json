@@ -1,0 +1,25 @@
+{
+  "name": "quickstart_products",
+  "mode": "list",
+  "start_urls": [
+    "https://example.com/products/1",
+    "https://example.com/products/2"
+  ],
+  "concurrency": 2,
+  "rate_limit": 2,
+  "fields": [
+    {
+      "name": "products",
+      "selector": "article.product",
+      "is_list": true,
+      "children": [
+        {"name": "title", "selector": "h2"},
+        {"name": "price", "selector": ".price", "transformers": ["strip"]}
+      ]
+    }
+  ],
+  "url_policy": {
+    "allowed_domains": ["example.com"],
+    "resolve_dns": false
+  }
+}

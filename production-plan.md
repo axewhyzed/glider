@@ -45,3 +45,10 @@ and annotated tag `v3.1.0` are pushed to GitHub.
 - [x] Push `main` and the tag with `git push origin main --follow-tags`.
 - [x] `verify_release.py --version 3.1.0` passed: local and remote `main` and
   `v3.1.0` resolve to `96b39dd7ec7d61b28a62adfd5c7a611eeb6c6ed8`.
+
+## v3.2.0 usage phase
+
+The completed usage-focused phase is documented in
+[`docs/V3.2_PLAN.md`](docs/V3.2_PLAN.md). It adds deterministic local
+validation, benchmarks, examples, and developer workflow improvements without
+changing the core configuration contract.

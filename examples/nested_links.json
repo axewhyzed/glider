@@ -1,0 +1,25 @@
+{
+  "name": "nested_product_pages",
+  "mode": "list",
+  "start_urls": ["https://shop.example.com/catalog"],
+  "max_nested_urls": 10,
+  "max_depth": 1,
+  "fields": [
+    {
+      "name": "product_urls",
+      "selector": "a.product-link",
+      "attribute": "href",
+      "is_list": true,
+      "follow_url": true,
+      "nested_fields": [
+        {"name": "title", "selector": "h1.product-title"},
+        {"name": "description", "selector": "div.description"},
+        {"name": "sku", "selector": "[data-sku]", "attribute": "data-sku"}
+      ]
+    }
+  ],
+  "url_policy": {
+    "allowed_domains": ["shop.example.com"],
+    "resolve_dns": false
+  }
+}

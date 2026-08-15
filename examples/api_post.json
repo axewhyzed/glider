@@ -1,0 +1,24 @@
+{
+  "name": "api_post_template",
+  "mode": "list",
+  "start_urls": ["https://api.example.com/search"],
+  "request_method": "POST",
+  "request_body_type": "json",
+  "request_body": {"query": "books", "limit": 25},
+  "response_type": "json",
+  "fields": [
+    {
+      "name": "results",
+      "selectors": [{"type": "json", "value": "results[*]"}],
+      "is_list": true,
+      "children": [
+        {"name": "id", "selectors": [{"type": "json", "value": "id"}]},
+        {"name": "title", "selectors": [{"type": "json", "value": "title"}]}
+      ]
+    }
+  ],
+  "url_policy": {
+    "allowed_domains": ["api.example.com"],
+    "resolve_dns": false
+  }
+}

@@ -20,15 +20,9 @@ In `pagination` mode, pages are always fetched one at a time regardless of the `
 
 ---
 
-### L3 — Bloom Filter Capacity Not Configurable via JSON Config
+### L3 — Bloom Filter Capacity Configurable via JSON Config (Resolved)
 
-The Bloom filter capacity (default 100 000 items) and error rate (default 0.1%) are hardcoded in `engine/scraper.py`.  They cannot be changed from the JSON config file.
-
-**Workaround:** Edit `engine/scraper.py` directly:
-```python
-# In ScraperEngine.__init__
-self.seen_hashes = BloomFilter(capacity=1_000_000, error_rate=0.001)
-```
+The Bloom filter capacity and error rate are now configurable via the `dedup` config block (`dedup.capacity`, `dedup.error_rate`, `dedup.exact_capacity`). Defaults preserve prior behavior (100 000 items, 0.1% error rate).
 
 ---
 
@@ -38,9 +32,9 @@ The micro-batch flush size (default 10 records per write) is hardcoded.  It can 
 
 ---
 
-### L5 — `debug_mode` Config Field Is Reserved
+### L5 — `debug_mode` Config Field
 
-The `debug_mode: bool` field is defined in the config schema and accepted without error, but it does not currently change any runtime behaviour.  It is reserved for a future feature (per-selector verbose tracing).
+The `debug_mode: bool` field forces DEBUG logging and raises the debug-snapshot cap. Per-selector verbose tracing is not implemented.
 
 ---
 
@@ -62,9 +56,9 @@ Dead or slow proxies remain in the rotation pool indefinitely.  There is no mech
 
 ---
 
-### L9 — No Redirect Limit Control
+### L9 — Redirect Limit Control (Resolved)
 
-`curl_cffi` follows redirects by default.  There is no config option to disable redirect following or cap the number of redirects.
+Redirects are followed manually with per-hop policy validation; the maximum hop count is configurable via `url_policy.max_redirects` (default 5). A redirect hop that violates URL policy aborts the chain.
 
 ---
 
@@ -92,17 +86,14 @@ Application-level DNS/IP checks (private-network blocking, `resolve_dns` pre-fli
 
 | Feature | Notes |
 |---|---|
-| `--output-dir` CLI flag | Currently always writes to `data/`. |
-| `--max-items` / `--limit` CLI flag | Stop after extracting N total records. |
-| `--dry-run` CLI flag | Validate config and test selectors without persisting data. |
-| `--validate` CLI flag | Check config syntax and report errors without scraping. |
 | POST request support | Required for REST APIs that use POST for queries. |
 | Per-domain rate limiting | Apply different `rate_limit` values per host. |
 | Proxy health monitoring | Remove dead proxies from rotation automatically. |
 | Sitemap.xml crawling | Discover URLs from a site's sitemap instead of pagination. |
-| Configurable Bloom filter | Set `capacity` and `error_rate` via the JSON config. |
 | Configurable batch size | Set `batch_size` via the JSON config. |
 | `debug_mode` implementation | Verbose selector tracing and intermediate value logging. |
 | Multiple output formats | Parquet, SQLite, NDJSON as export targets. |
 | CAPTCHA handling integration | Hook for external CAPTCHA-solving services. |
 | CSV nested list expansion | Expand list fields into multiple rows instead of pipe-joining. |
+
+*Implemented in the production-readiness release:* `--output-dir`, `--limit`, `--dry-run` (with `--url`), `validate`/`preview`/`scrape` CLI subcommands, configurable Bloom filter (`dedup.capacity`/`error_rate`), and intentional exit codes (0/1/2/4/130).

@@ -57,7 +57,7 @@ Built on **Python 3.9+**, it leverages **AsyncIO**, **Playwright**, and **curl_c
 ## 🛠️ Installation & Setup
 
 ### 1. Prerequisites
-* Python 3.9 or higher
+* Python 3.10 or higher
 * Git
 
 ### 2. Clone the Repository
@@ -78,13 +78,18 @@ python -m venv venv
 .\venv\Scripts\activate
 ```
 
-### 4. Install Dependencies
+### 4. Install
 
 ```bash
-pip install -r requirements.txt
-```
+# Core dependencies (installable package + console script)
+pip install -e .
 
-> **ℹ️ Windows note:** `requirements.txt` includes `win32-setctime` with a `; sys_platform == "win32"` marker so it is only installed on Windows. Linux/macOS users can install without modification.
+# Optional browser support (for "use_playwright": true)
+pip install -e ".[browser]"
+
+# Development dependencies (tests)
+pip install -r requirements-dev.txt
+```
 
 ### 5. Install Playwright Browsers
 
@@ -94,51 +99,67 @@ Required only if you plan to use `"use_playwright": true` in any config:
 playwright install chromium
 ```
 
+### Security defaults
+
+- Same-origin traversal by default; cross-origin links require `url_policy.allow_external_urls`.
+- Private/local network targets are blocked (`url_policy.block_private_networks`, `resolve_dns`).
+- TLS verification is on; `browser.ignore_https_errors` is `false` by default.
+- Sensitive headers and cookies are scoped to their origin and stripped cross-origin.
+- The run manifest stores a redacted copy of the config.
+
 ---
 
 ## 🚀 Quick Start
 
 Glider is controlled entirely by JSON configuration files. Several ready-to-run examples are in the `configs/` folder.
 
+### Install
+
+```bash
+pip install -e .            # core
+pip install -e ".[browser]" # optional: Playwright browser support
+playwright install chromium # only if you use "use_playwright": true
+```
+
 ### Run a Scrape
 
 ```bash
-# Static HTML site — Books to Scrape
-python main.py configs/books_example.json
+# Validate a config (no network, structured diagnostics)
+glider validate configs/books_example.json
 
-# Static HTML site — Hacker News
-python main.py configs/hacker_news.json
+# Preview one page (dry extraction, writes nothing)
+glider preview configs/hacker_news.json
 
-# JavaScript-rendered site — Quotes to Scrape (requires Playwright)
-python main.py configs/quotes_js.json
-
-# Public JSON API — Reddit (no auth required)
-python main.py configs/reddit_unauthenticated.json
-
-# Authenticated JSON API — Reddit OAuth (set REDDIT_* env vars)
-python main.py configs/reddit.json
-
-# Nested link-following — Reddit Discord invites
-python main.py configs/reddit_followlink.json
+# Run a full crawl in an isolated, resumable run directory
+glider scrape configs/books_example.json
+glider scrape configs/reddit.json --limit 3 --output-dir data
+glider scrape configs/books_example.json --resume <run_id>
 ```
+
+`python main.py <command> ...` works identically if you prefer not to install.
 
 ### What Gets Created
 
 | Path | Description |
 |---|---|
-| `data/<name>_<timestamp>.json` | Extracted records as a JSON array |
-| `data/<name>_<timestamp>.csv` | Extracted records as a flat CSV |
-| `data/<name>.db` | SQLite checkpoint database (if `use_checkpointing: true`) |
-| `data/<name>.bloom` | Bloom filter state (persisted for deduplication across runs) |
+| `<output-dir>/<name>/runs/<run_id>/stream.jsonl` | Raw extracted records |
+| `<output-dir>/<name>/runs/<run_id>/exports/output.json` | Records as a JSON array |
+| `<output-dir>/<name>/runs/<run_id>/exports/output.csv` | Records as flat CSV |
+| `<output-dir>/<name>/runs/<run_id>/manifest.json` | Run metadata + config digest + summary |
+| `<output-dir>/<name>/runs/<run_id>/checkpoint.sqlite` | Resumable crawl state |
+| `<output-dir>/<name>/runs/<run_id>/failures.jsonl` | Per-failure records |
+| `<output-dir>/<name>/runs/<run_id>/report.json` | Final operator report |
 | `logs/glider.log` | Structured execution log with rotation |
-| `debug/fail_*.html` | HTML snapshots of pages that failed to scrape |
 
 ### Interrupting a Scrape
 
 Press **Ctrl+C** at any time. Glider will:
-1. Flush all buffered records to `data/interrupted_data.json` and `data/interrupted_data.csv`.
+1. Flush buffered records to the run's `stream.jsonl` and export partial output.
 2. Close all browser contexts and HTTP sessions cleanly.
-3. Save the Bloom filter and checkpoint state so the next run can resume.
+3. Mark the run `cancelled` in `manifest.json` (artifacts preserved for resume).
+4. Print a resume command.
+
+See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for run directories, resume, retry policy, URL policy, and failure semantics.
 
 ---
 
@@ -173,6 +194,14 @@ All scraper behaviour is controlled by a single JSON file. See [`docs/CONFIG_REF
 | `pagination` | object | `null` | Pagination configuration (see below). |
 | `interactions` | list | `[]` | Browser interaction sequence (Playwright only). |
 | `authentication` | object | `null` | OAuth 2.0 or bearer token configuration (see below). |
+| `max_depth` | int 0–100 | `2` | Maximum nested-follow generations (`follow_url`). |
+| `robots_ttl_seconds` | float | `3600.0` | Per-origin robots.txt cache TTL. |
+| `url_policy` | object | see below | URL/SSRF policy: `allowed_domains`, `allow_subdomains`, `allow_external_urls`, `allowed_schemes`, `block_private_networks`, `resolve_dns`, `max_redirects`. |
+| `retry` | object | see below | Retry policy: `max_attempts`, `base_delay_seconds`, `max_delay_seconds`, `retry_statuses`, `retry_after_cap_seconds`. |
+| `browser` | object | see below | Browser safety: `ignore_https_errors`, `context_max_requests`, `proxy_rotation`. |
+| `dedup` | object | see below | Dedup policy: `mode` (`none`/`url`/`fields`/`exact_hash`), `capacity`, `error_rate`, `fields`, `exact_capacity`. |
+| `validation` | object | see below | Extraction validation: `min_records_per_page`, `required_fields`, `fail_on_empty`. |
+| `debug_snapshots` | object | see below | Bounded snapshots: `enabled`, `max_files`, `max_bytes_per_file`, `max_total_bytes`. |
 
 ### Fields
 
@@ -531,24 +560,22 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the complete fix list.
 ### Running Tests
 
 ```bash
-# Run all 36 tests
-python -m pytest tests/ -v
+# Default suite (no browser, no live network)
+venv\Scripts\python.exe -m pytest tests -q
+
+# With Playwright browsers installed
+venv\Scripts\python.exe -m pytest tests -m browser
 ```
 
-Tests cover: config schema validation, transformer pipeline, HTML/XPath/CSS resolution, JSON resolution, checkpoint persistence, scraper initialization, stats counting, and deduplication events.
+The suite covers config schema validation, transformers, resolvers, network policy/SSRF, checkpoint resume, run isolation, recursion/cycles, dedup, output writer, metrics, redaction, CLI exit codes, and operational cancellation/flush.
 
 ### Adding Tests
 
-Follow the existing patterns in `tests/`. Mark async tests with `@pytest.mark.asyncio`. Use `tmp_path` for any file I/O.
+Follow the existing patterns in `tests/`. Mark async tests with `@pytest.mark.asyncio`. Use `tmp_path` for any file I/O. Browser tests require the `browser` marker and `playwright install chromium`; network-dependent rows use the `network` marker (both excluded by default via `pytest.ini`).
 
 ### Updating Dependencies
 
-```bash
-pip freeze > requirements.txt
-```
-
-> **Note:** After freezing, manually re-add the conditional platform marker to `win32-setctime`:  
-> `win32-setctime==X.Y.Z ; sys_platform == "win32"`
+Edit `pyproject.toml` (dependencies / optional-dependencies) for packaging, or the pinned `requirements.txt` / `requirements-dev.txt` for dev installs.
 
 ---
 

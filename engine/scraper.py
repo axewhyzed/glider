@@ -142,6 +142,11 @@ class ScraperEngine:
             logger.success("✅ Finished!")
 
     async def _setup_resources(self):
+        # Establish the durable stream artifact before checkpoint/session setup
+        # can be interrupted. This guarantees cancellation leaves a resumable
+        # run with an explicit (possibly empty) JSONL stream.
+        if self.stream_writer is not None and not self.dry_run:
+            await self.stream_writer.open()
         await self.checkpoint.initialize()
         if not self.dry_run:
             self.seen_hashes.load(self.bloom_path)

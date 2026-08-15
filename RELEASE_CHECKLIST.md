@@ -21,5 +21,5 @@
 
 ## Post-release
 
-- [ ] Verify GitHub shows tag `v3.0.0` and the release commit.
-- [ ] Record the final commit/tag and remote verification in the living production plan.
+- [x] Verify GitHub shows tag `v3.0.0` and the release commit.
+- [x] Record the final commit/tag and remote verification in the living production plan.

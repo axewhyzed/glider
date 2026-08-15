@@ -97,8 +97,12 @@ def test_browser_context_blocks_service_workers_and_direct_unsafe_urls():
 
     data_url = "data:text/html,<html><body>offline</body></html>"
     assert manager._validate_navigation_url(data_url) == data_url
+    parameterized_data_url = "data:text/html;charset=utf-8,<html></html>"
+    assert manager._validate_navigation_url(parameterized_data_url) == parameterized_data_url
     with pytest.raises(ValueError):
         manager._validate_navigation_url("data:image/svg+xml,<svg></svg>")
+    with pytest.raises(ValueError):
+        manager._validate_navigation_url("data:text/htmlsomething,<html></html>")
 
 
 def test_browser_post_is_rejected_before_page_navigation():

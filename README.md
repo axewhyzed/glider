@@ -534,6 +534,15 @@ glider/
 
 ## 🆕 What's New
 
+### v3.3.0 — Usage benchmark matrix and browser validation
+
+* Strictly validate browser `data:text/html` media types, including support for
+  valid MIME parameters while rejecting lookalike types.
+* Run deterministic local benchmarks separately for list, pagination, JSON,
+  and nested-link workflows, with request and child-record accounting.
+* Improved the first-run example workflow with copy, validate, and scrape
+  instructions.
+
 ### v3.2.0 — Usage and developer workflow
 
 * Deterministic local HTTP validation for HTML pagination, JSON APIs, nested

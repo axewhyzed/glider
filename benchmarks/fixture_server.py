@@ -13,9 +13,10 @@ class _FixtureHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, *, page_count: int):
+    def __init__(self, address, handler, *, page_count: int, catalog_count: int):
         super().__init__(address, handler)
         self.page_count = page_count
+        self.catalog_count = catalog_count
         self.request_count = 0
         self._request_count_lock = threading.Lock()
 
@@ -52,12 +53,13 @@ class _FixtureHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/catalog":
+            links = "".join(
+                f"<a class='product-link' href='/item/{index}'>item {index}</a>"
+                for index in range(1, server.catalog_count + 1)
+            )
             self._send(
                 200,
-                "<html><body>"
-                "<a class='product-link' href='/item/1'>one</a>"
-                "<a class='product-link' href='/item/2'>two</a>"
-                "</body></html>",
+                f"<html><body>{links}</body></html>",
             )
             return
 
@@ -102,10 +104,17 @@ class FixtureServer:
     normal private-network policy in their test configuration explicitly.
     """
 
-    def __init__(self, page_count: int = 3) -> None:
+    def __init__(self, page_count: int = 3, catalog_count: int = 2) -> None:
         if page_count < 1:
             raise ValueError("page_count must be positive")
-        self._server = _FixtureHTTPServer(("127.0.0.1", 0), _FixtureHandler, page_count=page_count)
+        if catalog_count < 1:
+            raise ValueError("catalog_count must be positive")
+        self._server = _FixtureHTTPServer(
+            ("127.0.0.1", 0),
+            _FixtureHandler,
+            page_count=page_count,
+            catalog_count=catalog_count,
+        )
         self._thread: threading.Thread | None = None
 
     @property

@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.3.0 - Usage benchmark matrix and browser validation (August 2026)
+
+### Fixes
+
+* Validate the actual `data:` media type for browser HTML navigations instead
+  of accepting arbitrary strings with a `data:text/html` prefix. Valid MIME
+  parameters remain supported, while lookalike types are rejected.
+
+### Usage validation
+
+* Added separate deterministic local benchmark scenarios for list extraction,
+  HTML pagination, JSON extraction, and nested-link extraction.
+* Added request and nested-child record accounting to benchmark output while
+  preserving the existing `run_benchmark()` list benchmark API.
+* Improved the first-run examples workflow with copy, validate, and scrape
+  instructions.
+
+### Verification
+
+* Added regression coverage for strict data-URL validation and the complete
+  local benchmark scenario matrix.
+
 ## v3.2.1 - Browser smoke and Windows event-loop compatibility (August 2026)
 
 ### Fixes

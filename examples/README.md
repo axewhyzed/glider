@@ -10,12 +10,24 @@ Validate any example before running it:
 venv\Scripts\glider.exe validate examples\quickstart_list.json --format json
 ```
 
+For a first run, copy a template, replace its example host and selectors, then
+validate before scraping:
+
+```powershell
+Copy-Item examples\quickstart_list.json my_scraper.json
+venv\Scripts\glider.exe validate my_scraper.json --format json
+venv\Scripts\glider.exe scrape my_scraper.json --output-dir data
+```
+
 For a deterministic end-to-end run without external network access, use the
 local fixture benchmark:
 
 ```powershell
 venv\Scripts\python.exe -m benchmarks.local --pages 100 --concurrency 10 --repeats 3
 ```
+
+The command runs list, pagination, JSON, and nested-link scenarios separately.
+Use `--scenario list`, `pagination`, `json`, or `nested` to measure one path.
 
 Examples included:
 

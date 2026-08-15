@@ -308,8 +308,10 @@ class BrowserManager:
             # smoke gate and local browser callers. The route guard below
             # blocks every data subresource and all network requests from this
             # document, so this exception cannot widen outbound access.
-            media = raw_url.split(",", 1)[0].lower()
-            if not media.startswith("data:text/html"):
+            header, separator, _ = raw_url.partition(",")
+            media_declaration = header[5:] if header[:5].lower() == "data:" else ""
+            media_type = media_declaration.split(";", 1)[0].strip().lower()
+            if not separator or media_type != "text/html":
                 raise ValueError("Browser data navigation only supports text/html")
             if len(raw_url) > 2_000_000:
                 raise ValueError("Browser data navigation exceeds the 2 MB limit")

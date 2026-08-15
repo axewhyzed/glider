@@ -2,6 +2,19 @@
 
 ---
 
+## v3.2.1 to v3.3.0 (August 2026)
+
+This release is backward-compatible for scraper configurations.
+
+* Browser HTML data URLs now require the exact `text/html` media type; valid
+  MIME parameters are accepted and lookalike media types are rejected.
+* Run `python -m benchmarks.local` to measure list, pagination, JSON, and
+  nested-link workflows separately. Use `--scenario` to isolate one path.
+* Use the copy/validate/scrape workflow in `examples/README.md` when starting
+  a new configuration.
+
+---
+
 ## v3.2.0 to v3.2.1 (August 2026)
 
 This patch release fixes the offline browser smoke path and Windows embedding

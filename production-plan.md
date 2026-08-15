@@ -59,3 +59,14 @@ changing the core configuration contract.
 - [x] Remove import-time Windows event-loop policy mutation from the CLI.
 - [x] Verify browser suite, full suite, Pyright, compile, examples, and package
   build before tagging the patch release.
+
+## v3.3.0 usage validation follow-up
+
+- [x] Tighten browser `data:text/html` validation to require the exact media
+  type while preserving valid MIME parameters.
+- [x] Add separate deterministic local benchmark scenarios for list,
+  pagination, JSON, and nested-link workflows.
+- [x] Add request and nested-child accounting plus regression coverage for the
+  benchmark matrix.
+- [x] Improve the first-run examples workflow and benchmark documentation.
+- [ ] Complete release verification, tag `v3.3.0`, and push the release.

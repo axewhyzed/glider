@@ -100,3 +100,18 @@ def test_local_benchmark_smoke():
     result = run_benchmark(pages=5, concurrency=2, repeats=1)
     assert result["runs"][0]["records"] == 5
     assert result["runs"][0]["failed_pages"] == 0
+
+
+def test_local_benchmark_usage_matrix():
+    from benchmarks.local import run_usage_benchmark
+
+    result = run_usage_benchmark(pages=3, concurrency=2, repeats=1)
+    assert set(result["scenarios"]) == {"list", "pagination", "json", "nested"}
+    assert result["scenarios"]["list"]["runs"][0]["records"] == 3
+    assert result["scenarios"]["pagination"]["runs"][0]["records"] == 3
+    assert result["scenarios"]["json"]["runs"][0]["records"] == 3
+    assert result["scenarios"]["nested"]["runs"][0]["nested_records"] == 3
+    assert all(
+        scenario["runs"][0]["failed_pages"] == 0
+        for scenario in result["scenarios"].values()
+    )

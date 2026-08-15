@@ -22,12 +22,14 @@
 
 - Release implementation commit: `17ffd39dfc8698738a7c27e3cf80b46369e8faad`.
 - Annotated tag `v3.2.0` points to the release implementation commit above.
-- The final documentation follow-up commit is recorded after this checklist
-  is updated; `origin/main` will point to that descendant commit.
+- Final documentation follow-up commit: `71881f2`.
+- `origin/main` contains that descendant commit; the tag intentionally remains
+  on the implementation commit.
 
 ## Post-release
 
 - [x] Run `venv\Scripts\python.exe verify_release.py --version 3.2.0`.
 - [x] Verify GitHub shows tag `v3.2.0` and the release commit.
-- [ ] Record the final documentation commit and remote verification after the
-  checklist follow-up is pushed.
+- [x] Remote `v3.2.0` resolves to
+  `17ffd39dfc8698738a7c27e3cf80b46369e8faad`, and remote `main` contains the
+  post-release documentation commit `71881f2` and its final checklist update.

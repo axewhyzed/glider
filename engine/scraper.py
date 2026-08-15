@@ -6,7 +6,7 @@ import time
 import aiofiles
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Callable, Awaitable, cast, Tuple
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Callable, Awaitable, cast, Tuple
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
 from itertools import cycle
 
@@ -37,6 +37,9 @@ from engine.errors import AuthError, ErrorCategory, FetchError, NON_RETRYABLE_CA
 from engine.redact import redact_text
 from engine.robots import RobotsCache
 from engine.run import RunContext
+
+if TYPE_CHECKING:
+    from engine.writer import JsonlStreamWriter
 
 class ScraperEngine:
     def __init__(
@@ -350,6 +353,7 @@ class ScraperEngine:
 
         async with self.rate_limiter:
             await self.checkpoint.mark_in_progress(url, kind="root")
+            content = ""
             try:
                 result = await self._fetch_page(url, purpose=RequestPurpose.ROOT)
                 content = result.content

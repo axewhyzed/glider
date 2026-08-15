@@ -9,10 +9,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from typing import Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Dict, Mapping, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from engine.schemas import RetryConfig, UrlPolicyConfig
+
+if TYPE_CHECKING:
+    from engine.errors import FetchError
 
 
 class RequestPurpose(str, Enum):
@@ -148,7 +151,7 @@ def _host_resolves_to_private(hostname: str) -> bool:
     except OSError:
         return False
     for info in infos:
-        address = info[4][0]
+        address = str(info[4][0])
         if _host_is_private(address):
             return True
     return False
@@ -172,12 +175,13 @@ class UrlPolicy:
         parsed = urlsplit(canonical)
         if parsed.scheme not in self.config.allowed_schemes:
             raise UrlPolicyError(f"URL scheme is not allowed: {parsed.scheme}")
-        if self.config.block_private_networks and _host_is_private(parsed.hostname or ""):
-            raise PrivateAddressError(f"Private or local address is not allowed: {parsed.hostname}")
-        if self.config.resolve_dns and not _is_ip_literal(parsed.hostname or ""):
-            if _host_resolves_to_private(parsed.hostname or ""):
+        hostname = str(parsed.hostname or "")
+        if self.config.block_private_networks and _host_is_private(hostname):
+            raise PrivateAddressError(f"Private or local address is not allowed: {hostname}")
+        if self.config.resolve_dns and not _is_ip_literal(hostname):
+            if _host_resolves_to_private(hostname):
                 raise PrivateAddressError(
-                    f"Hostname resolves to a private address: {parsed.hostname}"
+                    f"Hostname resolves to a private address: {hostname}"
                 )
         if parent_url and not self.is_allowed_origin(canonical, parent_url):
             raise UrlPolicyError(f"Cross-origin URL is not allowed: {canonical}")

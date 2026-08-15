@@ -3,7 +3,7 @@ import re # <--- NEW
 from functools import lru_cache
 from jsonpath_ng import parse
 from lxml import html as lxml_html
-from typing import Any, List, Optional
+from typing import Any, List, Optional, cast
 from loguru import logger
 from engine.schemas import DataField, SelectorType
 from engine.utils import apply_transformers
@@ -22,7 +22,7 @@ def _compile_jsonpath(expr: str):
 
 
 @lru_cache(maxsize=512)
-def _compile_regex(pattern: str):
+def _compile_regex(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern)
 
 class JsonResolver:
@@ -195,7 +195,9 @@ class HtmlResolver:
         for selector in field.selectors:
             if selector.type == SelectorType.REGEX:
                 try:
-                    parent_html = lxml_html.tostring(parent_element, encoding="unicode")
+                    parent_html = cast(
+                        str, lxml_html.tostring(parent_element, encoding="unicode")
+                    )
                     for match in _compile_regex(selector.value).findall(parent_html):
                         value = match if isinstance(match, str) else "".join(match)
                         results.append(apply_transformers(value, field.transformers))

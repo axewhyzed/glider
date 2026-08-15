@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from jsonpath_ng import parse as parse_jsonpath
-from lxml import etree
+import lxml.etree as etree
 from lxml.cssselect import CSSSelector
 from pydantic import ValidationError
 

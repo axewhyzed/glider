@@ -1,15 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import time
-from typing import Optional, Any, Callable, Awaitable, Dict, List
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, cast
 
 try:
-    from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+    from playwright.async_api import async_playwright
 except ImportError:  # pragma: no cover - exercised by core-only installs
     async_playwright = None
-    Page = Any
-    Browser = Any
-    BrowserContext = Any
+
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, BrowserContext, Page
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from fake_useragent import UserAgent
@@ -18,14 +20,14 @@ from engine.schemas import ScraperConfig, InteractionType
 from engine.network import FetchResult
 
 # Optional stealth — support both old module-style and new direct-function-style imports
-stealth_async: Optional[Callable[[Page], Awaitable[None]]] = None
+stealth_async: Optional[Callable[[Any], Awaitable[None]]] = None
 try:
     from playwright_stealth import stealth_async as _stealth_import  # type: ignore
     # Newer versions export the function directly; older versions wrapped it in a module object
     if callable(_stealth_import):
-        stealth_async = _stealth_import
+        stealth_async = cast(Callable[[Any], Awaitable[None]], _stealth_import)
     elif hasattr(_stealth_import, 'stealth_async') and callable(_stealth_import.stealth_async):
-        stealth_async = _stealth_import.stealth_async  # type: ignore
+        stealth_async = cast(Callable[[Any], Awaitable[None]], _stealth_import.stealth_async)
 except ImportError:
     pass
 
@@ -132,9 +134,10 @@ class BrowserManager:
                 else:
                     pw_cookies = []
 
-                self.context = await self.browser.new_context(**context_options)
+                context = await self.browser.new_context(**context_options)
+                self.context = context
                 if pw_cookies:
-                    await self.context.add_cookies(pw_cookies)
+                    await context.add_cookies(pw_cookies)
                     logger.info(f"🍪 Injected {len(pw_cookies)} cookies into Playwright context")
             except Exception as e:
                 logger.error(f"❌ Failed to inject cookies into browser context: {e}")
@@ -142,6 +145,8 @@ class BrowserManager:
         else:
             self.context = await self.browser.new_context(**context_options)
 
+        if self.context is None:
+            raise RuntimeError("Browser context was not created")
         await self._install_request_guard(self.context)
         self.request_count = 0
         self._context_proxy = proxy
